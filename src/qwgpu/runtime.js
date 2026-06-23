@@ -6,6 +6,7 @@
 import { GEMV, GEMV4, LORA_A, LORA_A_BATCH, LORA_B_ADD_T, RMSNORM, ROPE, ATTN_PARTIAL, ATTN_COMBINE, ADD, SILUMUL, EMBED, EMBED_BUF, ARGMAX,
   GEMM4, RMSNORM_T, ROPE_T, EMBED_T, ATTN_PREFILL } from './kernels.js';
 import { createQwenSchema } from './model_schema.js';
+import { createDispatchPlan } from './dispatch_plan.js';
 import { streamSafetensors } from './safetensors_loader.js';
 import { ModelUploader } from './model_uploader.js';
 import { GPUBufferPool } from './buffer_pool.js';
@@ -44,7 +45,7 @@ export class QwenWGPU {
       gemm4: this._pipe(GEMM4), rmsT: this._pipe(RMSNORM_T), ropeT: this._pipe(ROPE_T), embedT: this._pipe(EMBED_T), attnPrefill: this._pipe(ATTN_PREFILL) };
     onProgress('streaming + quantizing weights', 0);
     this.schema = createQwenSchema(c);
-    this.layers = this.schema.layers;
+    this.plan = createDispatchPlan(this.schema);
     this.q = {}; this.q4 = {};
     const uploader = new ModelUploader({
       schema: this.schema,
@@ -207,27 +208,27 @@ export class QwenWGPU {
     // embed: dequant row tokenId of embed_tokens int8 -> hidden (use gemv? no; copy+scale). Use a tiny loraA-style? Simplest: a gemv with a one-hot is overkill.
     // We do embed lookup on CPU-uploaded row: handled by caller via this.embedRow(tokenId) into S.hidden.
     for (let i = 0; i < c.numLayers; i++) {
-      const p = `model.layers.${i}`;
-      this.rms(enc, S.hidden, this.bufs[`${p}.input_layernorm.weight`], S.normed, c.hiddenSize);
-      this.gemv4(enc, S.normed, this.q4[`${p}.self_attn.q_proj.weight`], S.q, this.bufs[`${p}.self_attn.q_proj.bias`], `layers.${i}.self_attn.q_proj`);
-      this.gemv4(enc, S.normed, this.q4[`${p}.self_attn.k_proj.weight`], S.k, this.bufs[`${p}.self_attn.k_proj.bias`], `layers.${i}.self_attn.k_proj`);
-      this.gemv4(enc, S.normed, this.q4[`${p}.self_attn.v_proj.weight`], S.v, this.bufs[`${p}.self_attn.v_proj.bias`], `layers.${i}.self_attn.v_proj`);
+      const L = this.plan.layers[i];
+      this.rms(enc, S.hidden, this.bufs[L.inputNorm], S.normed, c.hiddenSize);
+      this.gemv4(enc, S.normed, this.q4[L.q.weight], S.q, this.bufs[L.q.bias], L.q.loraKey);
+      this.gemv4(enc, S.normed, this.q4[L.k.weight], S.k, this.bufs[L.k.bias], L.k.loraKey);
+      this.gemv4(enc, S.normed, this.q4[L.v.weight], S.v, this.bufs[L.v.bias], L.v.loraKey);
       this.rope(enc, S.q, pos, c.numHeads); this.rope(enc, S.k, pos, c.numKVHeads);
       // append k,v to cache at position pos
       enc.copyBufferToBuffer(S.k, 0, this.kc[i], pos * kvd * 4, kvd * 4);
       enc.copyBufferToBuffer(S.v, 0, this.vc[i], pos * kvd * 4, kvd * 4);
       this.attn(enc, S.q, this.kc[i], this.vc[i], S.attn, pos + 1);
-      this.gemv4(enc, S.attn, this.q4[`${p}.self_attn.o_proj.weight`], S.tmp, null, `layers.${i}.self_attn.o_proj`);
+      this.gemv4(enc, S.attn, this.q4[L.o.weight], S.tmp, null, L.o.loraKey);
       this._addInto(enc, S.hidden, S.tmp, c.hiddenSize);             // residual
-      this.rms(enc, S.hidden, this.bufs[`${p}.post_attention_layernorm.weight`], S.normed, c.hiddenSize);
-      this.gemv4(enc, S.normed, this.q4[`${p}.mlp.gate_proj.weight`], S.tmp, null, `layers.${i}.mlp.gate_proj`);
-      this.gemv4(enc, S.normed, this.q4[`${p}.mlp.up_proj.weight`], S.tmp2, null, `layers.${i}.mlp.up_proj`);
+      this.rms(enc, S.hidden, this.bufs[L.postAttentionNorm], S.normed, c.hiddenSize);
+      this.gemv4(enc, S.normed, this.q4[L.gate.weight], S.tmp, null, L.gate.loraKey);
+      this.gemv4(enc, S.normed, this.q4[L.up.weight], S.tmp2, null, L.up.loraKey);
       this._siluMul(enc, S.tmp, S.tmp2, c.intermediateSize);          // tmp = silu(gate)*up
-      this.gemv4(enc, S.tmp, this.q4[`${p}.mlp.down_proj.weight`], S.normed, null, `layers.${i}.mlp.down_proj`);
+      this.gemv4(enc, S.tmp, this.q4[L.down.weight], S.normed, null, L.down.loraKey);
       this._addInto(enc, S.hidden, S.normed, c.hiddenSize);
     }
-    this.rms(enc, S.hidden, this.bufs['model.norm.weight'], S.normed, c.hiddenSize);
-    this.gemv(enc, S.normed, this.q['model.embed_tokens.weight'], S.logits, null, null); // lm_head (tied)
+    this.rms(enc, S.hidden, this.bufs[this.plan.finalNorm.name], S.normed, c.hiddenSize);
+    this.gemv(enc, S.normed, this.q[this.plan.embed.name], S.logits, null, null); // lm_head (tied)
   }
 
   _addInto(enc, yBuf, aBuf, n) {
@@ -240,7 +241,7 @@ export class QwenWGPU {
     const bg = n === this.cfg.intermediateSize ? this._bgCached(this.pipes.silu, [gateBuf, upBuf, u], `silu:${n}`) : this._bg(this.pipes.silu, [gateBuf, upBuf, u]);
     this._dispatch(enc, this.pipes.silu, bg, Math.min(Math.ceil(n/256), 65535), 1, 'silu');
   }
-  embedRow(enc, id) { const e = this.q['model.embed_tokens.weight']; this._dispatch(enc, this.pipes.embed, this._bg(this.pipes.embed, [e.w, e.scale, this.s.hidden, this._uni(new Uint32Array([id, this.cfg.hiddenSize]))]), Math.ceil(this.cfg.hiddenSize/256), 1, 'embed'); }
+  embedRow(enc, id) { const e = this.q[this.plan.embed.name]; this._dispatch(enc, this.pipes.embed, this._bg(this.pipes.embed, [e.w, e.scale, this.s.hidden, this._uni(new Uint32Array([id, this.cfg.hiddenSize]))]), Math.ceil(this.cfg.hiddenSize/256), 1, 'embed'); }
   async argmaxLogits() {
     const enc = this.dev.createCommandEncoder();
     this._dispatch(enc, this.pipes.argmax, this._bgCached(this.pipes.argmax, [this.s.logits, this.s.amax, this.u.argmax], 'argmax'), 1);
@@ -252,7 +253,7 @@ export class QwenWGPU {
   token(id, pos) { this._resetUni(); const enc = this.dev.createCommandEncoder(); this.embedRow(enc, id); this.step(enc, id, pos); this.dev.queue.submit([enc.finish()]); }
 
   // embed the token id held in s.amax (GPU-resident, from a prior argmax)
-  embedFromBuf(enc) { const e = this.q['model.embed_tokens.weight']; this._dispatch(enc, this.pipes.embedBuf, this._bgCached(this.pipes.embedBuf, [e.w, e.scale, this.s.hidden, this.s.amax, this.u.embedBuf], 'embedBuf'), Math.ceil(this.cfg.hiddenSize/256), 1, 'embed'); }
+  embedFromBuf(enc) { const e = this.q[this.plan.embed.name]; this._dispatch(enc, this.pipes.embedBuf, this._bgCached(this.pipes.embedBuf, [e.w, e.scale, this.s.hidden, this.s.amax, this.u.embedBuf], 'embedBuf'), Math.ceil(this.cfg.hiddenSize/256), 1, 'embed'); }
   // argmax(logits) -> s.amax, within the given encoder (no submit/readback)
   argmaxInto(enc) { this._dispatch(enc, this.pipes.argmax, this._bgCached(this.pipes.argmax, [this.s.logits, this.s.amax, this.u.argmax], 'argmax'), 1, 1, 'argmax'); }
 
@@ -340,31 +341,31 @@ export class QwenWGPU {
     this._resetUni();
     this.dev.queue.writeBuffer(ST.ids, 0, new Uint32Array(ids));
     const enc = this.dev.createCommandEncoder();
-    const e = this.q['model.embed_tokens.weight'];
+    const e = this.q[this.plan.embed.name];
     this._dispatch(enc, this.pipes.embedT, this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, this._uni(new Uint32Array([T, H]))]), Math.min(Math.ceil(T * H / 256), 65535), 1, 'embedT');
     for (let i = 0; i < c.numLayers; i++) {
-      const p = `model.layers.${i}`;
-      this.rmsT(enc, ST.hidden, this.bufs[`${p}.input_layernorm.weight`], ST.normed, T, H);
-      this.gemm4(enc, ST.normed, this.q4[`${p}.self_attn.q_proj.weight`], ST.q, T, this.bufs[`${p}.self_attn.q_proj.bias`], `layers.${i}.self_attn.q_proj`);
-      this.gemm4(enc, ST.normed, this.q4[`${p}.self_attn.k_proj.weight`], ST.k, T, this.bufs[`${p}.self_attn.k_proj.bias`], `layers.${i}.self_attn.k_proj`);
-      this.gemm4(enc, ST.normed, this.q4[`${p}.self_attn.v_proj.weight`], ST.v, T, this.bufs[`${p}.self_attn.v_proj.bias`], `layers.${i}.self_attn.v_proj`);
+      const L = this.plan.layers[i];
+      this.rmsT(enc, ST.hidden, this.bufs[L.inputNorm], ST.normed, T, H);
+      this.gemm4(enc, ST.normed, this.q4[L.q.weight], ST.q, T, this.bufs[L.q.bias], L.q.loraKey);
+      this.gemm4(enc, ST.normed, this.q4[L.k.weight], ST.k, T, this.bufs[L.k.bias], L.k.loraKey);
+      this.gemm4(enc, ST.normed, this.q4[L.v.weight], ST.v, T, this.bufs[L.v.bias], L.v.loraKey);
       this.ropeT(enc, ST.q, T, c.numHeads); this.ropeT(enc, ST.k, T, c.numKVHeads);
       enc.copyBufferToBuffer(ST.k, 0, this.kc[i], 0, T * kvd * 4);
       enc.copyBufferToBuffer(ST.v, 0, this.vc[i], 0, T * kvd * 4);
       this.attnPrefill(enc, ST.q, this.kc[i], this.vc[i], ST.attn, T);
-      this.gemm4(enc, ST.attn, this.q4[`${p}.self_attn.o_proj.weight`], ST.tmp, T, null, `layers.${i}.self_attn.o_proj`);
+      this.gemm4(enc, ST.attn, this.q4[L.o.weight], ST.tmp, T, null, L.o.loraKey);
       this._addInto(enc, ST.hidden, ST.tmp, T * H);
-      this.rmsT(enc, ST.hidden, this.bufs[`${p}.post_attention_layernorm.weight`], ST.normed, T, H);
-      this.gemm4(enc, ST.normed, this.q4[`${p}.mlp.gate_proj.weight`], ST.tmp, T, null, `layers.${i}.mlp.gate_proj`);
-      this.gemm4(enc, ST.normed, this.q4[`${p}.mlp.up_proj.weight`], ST.tmp2, T, null, `layers.${i}.mlp.up_proj`);
+      this.rmsT(enc, ST.hidden, this.bufs[L.postAttentionNorm], ST.normed, T, H);
+      this.gemm4(enc, ST.normed, this.q4[L.gate.weight], ST.tmp, T, null, L.gate.loraKey);
+      this.gemm4(enc, ST.normed, this.q4[L.up.weight], ST.tmp2, T, null, L.up.loraKey);
       this._siluMul(enc, ST.tmp, ST.tmp2, T * c.intermediateSize);
-      this.gemm4(enc, ST.tmp, this.q4[`${p}.mlp.down_proj.weight`], ST.normed, T, null, `layers.${i}.mlp.down_proj`);
+      this.gemm4(enc, ST.tmp, this.q4[L.down.weight], ST.normed, T, null, L.down.loraKey);
       this._addInto(enc, ST.hidden, ST.normed, T * H);
     }
     // last row -> final norm -> lm_head (reuse decode single-row kernels)
     enc.copyBufferToBuffer(ST.hidden, (T - 1) * H * 4, S.hidden, 0, H * 4);
-    this.rms(enc, S.hidden, this.bufs['model.norm.weight'], S.normed, H);
-    this.gemv(enc, S.normed, this.q['model.embed_tokens.weight'], S.logits, null, null);
+    this.rms(enc, S.hidden, this.bufs[this.plan.finalNorm.name], S.normed, H);
+    this.gemv(enc, S.normed, this.q[this.plan.embed.name], S.logits, null, null);
     this.dev.queue.submit([enc.finish()]);
   }
 
