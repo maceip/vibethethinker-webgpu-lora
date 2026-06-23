@@ -1,6 +1,7 @@
 import { chromium } from 'playwright';
-const CANARY = '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary';
-const browser = await chromium.launch({ executablePath: CANARY, headless: false,
+import { existsSync } from 'node:fs';
+const CHROME = process.env.CHROME_PATH || (existsSync('/usr/local/bin/google-chrome') ? '/usr/local/bin/google-chrome' : '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary');
+const browser = await chromium.launch({ executablePath: CHROME, headless: false,
   args: ['--enable-unsafe-webgpu','--enable-features=WebGPU','--use-angle=metal','--no-first-run'] });
 const page = await browser.newPage();
 const lines = [];

@@ -3,8 +3,8 @@
 // buffers consumed by the GEMV kernel). No tf.js → no per-op dispatch overhead.
 //
 // Correctness is validated against the tf.js forward (which == HuggingFace).
-import { GEMV, GEMV4, LORA_A, LORA_A_BATCH, LORA_B_ADD_T, RMSNORM, ROPE, ATTN_PARTIAL, ATTN_COMBINE, ADD, SILUMUL, EMBED, EMBED_BUF, ARGMAX,
-  GEMM4, RMSNORM_T, ROPE_T, EMBED_T, ATTN_PREFILL } from './kernels.js';
+import { GEMV, GEMV4, GEMV4_ADD, QKV_GEMV4, GATE_UP_SILU_GEMV4, LORA_A, LORA_A_BATCH, LORA_B_ADD, LORA_B_ADD_T, RMSNORM, ROPE, ROPE_QK, ATTN_PARTIAL, ATTN_COMBINE, ADD, SILUMUL, EMBED, EMBED_BUF, ARGMAX,
+  GEMM4, GEMM4_ADD_T, RMSNORM_T, ROPE_T, EMBED_T, ATTN_PREFILL, ATTN_PREFILL_BLOCK } from './kernels.js';
 import { createQwenSchema } from './model_schema.js';
 import { createDispatchPlan } from './dispatch_plan.js';
 import { streamSafetensors } from './safetensors_loader.js';
@@ -19,16 +19,39 @@ export class QwenWGPU {
   // raise toward the base model's limit, e.g. 32768, memory permitting — KV cache grows linearly).
   constructor(device, cfg, opts = {}) {
     this.dev = device; this.cfg = cfg; this.lora = null; this.bufs = {}; this.opts = opts;
+    this.features = this._normalizeFeatures(opts);
     this.pool = new GPUBufferPool(device, { cacheBindGroups: opts.cacheBindGroups !== false });
     this._loraEpoch = 0;
+    this.lastDispatchCount = 0;
+    this.packedBytes = 0;
   }
+
+  _normalizeFeatures(opts = {}) {
+    const prefillAttention = opts.prefillAttention || 'block';
+    if (!['row', 'block'].includes(prefillAttention)) throw new Error(`unsupported prefillAttention ${prefillAttention}`);
+    return {
+      fuseQKV: opts.fuseQKV !== false,
+      fuseRoPE: opts.fuseRoPE !== false,
+      fuseMLP: opts.fuseMLP !== false,
+      fuseResidual: opts.fuseResidual !== false,
+      prefillAttention,
+      prefillChunkSize: Math.max(0, opts.prefillChunkSize || 0),
+    };
+  }
+
+  setFeatureFlags(flags = {}) {
+    this.features = this._normalizeFeatures({ ...this.features, ...flags });
+    this.pool.clearSensitiveBindGroups();
+  }
+
+  featureFlags() { return { ...this.features }; }
 
   _buf(size, usage = STORAGE) { return this.pool.buffer(size, usage); }
   _f32(arr, usage = STORAGE) { return this.pool.uploadF32(arr, usage); }
   _u32(arr) { return this.pool.uploadU32(arr, STORAGE); }
   _uni(arr) { return this.pool.dynamicUniform(arr, UNIFORM); }
   _staticUni(key, arr) { return this.pool.staticUniform(key, arr, UNIFORM); }
-  _resetUni() { this.pool.resetUniforms(); }
+  _resetUni() { this.pool.resetUniforms(); this.lastDispatchCount = 0; }
 
   _pipe(code) {
     const m = this.dev.createShaderModule({ code });
@@ -41,12 +64,12 @@ export class QwenWGPU {
     this.CHUNK = 128; this.MAXBATCH = 16;
     this.maxCtx = this.opts.maxCtx || 8192;                       // context window (KV cache length)
     this.maxPrefillT = Math.min(this.opts.maxPrefillT || 8192, this.maxCtx); // batched-prefill cap (<= ctx)
-    this.pipes = { gemv: this._pipe(GEMV), loraA: this._pipe(LORA_A), loraABatch: this._pipe(LORA_A_BATCH), loraBAddT: this._pipe(LORA_B_ADD_T), rms: this._pipe(RMSNORM), rope: this._pipe(ROPE), attnP: this._pipe(ATTN_PARTIAL), attnC: this._pipe(ATTN_COMBINE), add: this._pipe(ADD), silu: this._pipe(SILUMUL), embed: this._pipe(EMBED), embedBuf: this._pipe(EMBED_BUF), argmax: this._pipe(ARGMAX), gemv4: this._pipe(GEMV4),
-      gemm4: this._pipe(GEMM4), rmsT: this._pipe(RMSNORM_T), ropeT: this._pipe(ROPE_T), embedT: this._pipe(EMBED_T), attnPrefill: this._pipe(ATTN_PREFILL) };
+    this.pipes = { gemv: this._pipe(GEMV), loraA: this._pipe(LORA_A), loraABatch: this._pipe(LORA_A_BATCH), loraBAdd: this._pipe(LORA_B_ADD), loraBAddT: this._pipe(LORA_B_ADD_T), rms: this._pipe(RMSNORM), rope: this._pipe(ROPE), ropeQK: this._pipe(ROPE_QK), attnP: this._pipe(ATTN_PARTIAL), attnC: this._pipe(ATTN_COMBINE), add: this._pipe(ADD), silu: this._pipe(SILUMUL), embed: this._pipe(EMBED), embedBuf: this._pipe(EMBED_BUF), argmax: this._pipe(ARGMAX), gemv4: this._pipe(GEMV4), gemv4Add: this._pipe(GEMV4_ADD), qkvGemv4: this._pipe(QKV_GEMV4), gateUpSiluGemv4: this._pipe(GATE_UP_SILU_GEMV4),
+      gemm4: this._pipe(GEMM4), gemm4AddT: this._pipe(GEMM4_ADD_T), rmsT: this._pipe(RMSNORM_T), ropeT: this._pipe(ROPE_T), embedT: this._pipe(EMBED_T), attnPrefill: this._pipe(ATTN_PREFILL), attnPrefillBlock: this._pipe(ATTN_PREFILL_BLOCK) };
     onProgress('streaming + quantizing weights', 0);
     this.schema = createQwenSchema(c);
     this.plan = createDispatchPlan(this.schema);
-    this.q = {}; this.q4 = {};
+    this.q = {}; this.q4 = {}; this.qkv = []; this.gateUp = [];
     const uploader = new ModelUploader({
       schema: this.schema,
       q: this.q,
@@ -64,6 +87,7 @@ export class QwenWGPU {
       },
     });
     uploader.finalize();
+    await this._buildPackedProjectionBuffers();
     // Context window (this.maxCtx) set above from opts; RoPE tables + KV cache sized to it.
     this._buildRope(this.maxCtx);
     // KV cache (f32) per layer
@@ -76,7 +100,7 @@ export class QwenWGPU {
     this.s = {
       hidden: this._buf(H * 4), normed: this._buf(H * 4), q: this._buf(qd * 4), k: this._buf(kvd * 4), v: this._buf(kvd * 4),
       attn: this._buf(qd * 4), tmp: this._buf(Math.max(qd, I) * 4), tmp2: this._buf(I * 4), logits: this._buf(c.vocabSize * 4),
-      dummy: this._buf(64), loraD: this._buf(256 * 4), amax: this._buf(4),
+      dummy: this._buf(64), loraD: this._buf(256 * 4), loraD2: this._buf(256 * 4), amax: this._buf(4),
       pm: this._buf(c.numHeads * NSPLITMAX * 4), pz: this._buf(c.numHeads * NSPLITMAX * 4), po: this._buf(c.numHeads * NSPLITMAX * c.headDim * 4),
       idsBuf: this._buf(this.MAXBATCH * 4),
     };
@@ -111,6 +135,58 @@ export class QwenWGPU {
     };
   }
 
+  async _buildPackedProjectionBuffers() {
+    const enc = this.dev.createCommandEncoder();
+    const copy = (src, dst, dstOffset, bytes) => enc.copyBufferToBuffer(src, 0, dst, dstOffset, bytes);
+    this.packedBytes = 0;
+    for (const L of this.plan.layers) {
+      const q = this.q4[L.q.weight], k = this.q4[L.k.weight], v = this.q4[L.v.weight];
+      if (q.K !== k.K || q.K !== v.K || q.gpr !== k.gpr || q.gpr !== v.gpr) throw new Error(`layer ${L.index} qkv packing requires matching K/gpr`);
+      const totalN = q.N + k.N + v.N;
+      const wBytes = totalN * (q.K / 8) * 4;
+      const scaleBytes = totalN * q.gpr * 4;
+      const biasBytes = totalN * 4;
+      const w = this._buf(wBytes);
+      const scale = this._buf(scaleBytes);
+      const bias = this._buf(biasBytes);
+      let wOff = 0, sOff = 0, bOff = 0;
+      for (const part of [L.q, L.k, L.v]) {
+        const qq = this.q4[part.weight];
+        const rowsW = qq.N * (qq.K / 8) * 4;
+        const rowsS = qq.N * qq.gpr * 4;
+        copy(qq.w, w, wOff, rowsW); wOff += rowsW;
+        copy(qq.scale, scale, sOff, rowsS); sOff += rowsS;
+        if (part.bias) copy(this.bufs[part.bias], bias, bOff, qq.N * 4);
+        bOff += qq.N * 4;
+      }
+      this.qkv[L.index] = { w, scale, bias, K: q.K, qN: q.N, kN: k.N, vN: v.N, totalN, gpr: q.gpr };
+      this.packedBytes += wBytes + scaleBytes + biasBytes;
+
+      const gate = this.q4[L.gate.weight], up = this.q4[L.up.weight];
+      if (gate.K !== up.K || gate.N !== up.N || gate.gpr !== up.gpr) throw new Error(`layer ${L.index} gate/up packing requires matching shape`);
+      const guWBytes = (gate.N + up.N) * (gate.K / 8) * 4;
+      const guScaleBytes = (gate.N + up.N) * gate.gpr * 4;
+      const guW = this._buf(guWBytes);
+      const guScale = this._buf(guScaleBytes);
+      copy(gate.w, guW, 0, gate.N * (gate.K / 8) * 4);
+      copy(up.w, guW, gate.N * (gate.K / 8) * 4, up.N * (up.K / 8) * 4);
+      copy(gate.scale, guScale, 0, gate.N * gate.gpr * 4);
+      copy(up.scale, guScale, gate.N * gate.gpr * 4, up.N * up.gpr * 4);
+      this.gateUp[L.index] = { w: guW, scale: guScale, K: gate.K, N: gate.N, gpr: gate.gpr };
+      this.packedBytes += guWBytes + guScaleBytes;
+    }
+    this.dev.queue.submit([enc.finish()]);
+    await this.dev.queue.onSubmittedWorkDone();
+  }
+
+  memoryFootprintBytes() {
+    const c = this.cfg;
+    const kvBytes = c.numLayers * 2 * c.numKVHeads * this.maxCtx * c.headDim * 4;
+    const decodeScratchBytes = c.hiddenSize * 2 * 4 + (c.numHeads * c.headDim + 2 * c.numKVHeads * c.headDim + c.numHeads * c.headDim) * 4 + (Math.max(c.numHeads * c.headDim, c.intermediateSize) + c.intermediateSize + c.vocabSize) * 4;
+    const prefillScratchBytes = this.sTcap ? (this.sTcap * (3 * c.hiddenSize + c.numHeads * c.headDim + 2 * c.numKVHeads * c.headDim + c.numHeads * c.headDim + 2 * c.intermediateSize) * 4) : 0;
+    return { kvBytes, decodeScratchBytes, prefillScratchBytes, packedBytes: this.packedBytes };
+  }
+
   _gemvMeta(q, biasBuf, mod) {
     const gx = Math.min(q.N, 65535);
     const meta = new ArrayBuffer(32); const dv = new DataView(meta);
@@ -139,6 +215,7 @@ export class QwenWGPU {
     return this.pool.cachedBindGroup(pipe, buffers, key, opts);
   }
   _dispatch(enc, pipe, bg, gx, gy=1, cat) {
+    this.lastDispatchCount++;
     let ts;
     if (this.prof && this.prof.idx < this.prof.cap) { const i = this.prof.idx++; this.prof.cats.push(cat || 'misc'); ts = { querySet: this.prof.qs, beginningOfPassWriteIndex: 2*i, endOfPassWriteIndex: 2*i+1 }; }
     const p = enc.beginComputePass(ts ? { timestampWrites: ts } : undefined); p.setPipeline(pipe); p.setBindGroup(0, bg); p.dispatchWorkgroups(gx, gy); p.end();
@@ -180,6 +257,54 @@ export class QwenWGPU {
     const bg = this._bgCached(this.pipes.gemv4, [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf, meta.buf], key, { sensitive: !!mod });
     this._dispatch(enc, this.pipes.gemv4, bg, meta.gx, meta.gy, `g4:${q.N}x${q.K}`);
   }
+
+  _loraA(enc, xBuf, q, mod, dBuf, moduleKey, label = 'loraA') {
+    const uA = this._staticUni(`loraA:${this._loraEpoch}:${q.K}:${mod.rank}`, new Uint32Array([q.K, mod.rank]));
+    this._dispatch(enc, this.pipes.loraA, this._bgCached(this.pipes.loraA, [xBuf, mod.A, dBuf, uA], `${label}:${moduleKey}:${this._loraEpoch}`, { sensitive: true }), mod.rank, 1, label);
+  }
+
+  _loraBAdd(enc, yBuf, q, mod, dBuf, moduleKey) {
+    const meta = new ArrayBuffer(32); const dv = new DataView(meta);
+    dv.setUint32(0, q.N, true); dv.setUint32(4, mod.rank, true); dv.setFloat32(16, mod.scale, true);
+    const bg = this._bgCached(this.pipes.loraBAdd, [dBuf, mod.B, yBuf, this._uni(new Uint8Array(meta))], `loraBAdd:${moduleKey}:${this._loraEpoch}`, { sensitive: true });
+    this._dispatch(enc, this.pipes.loraBAdd, bg, Math.ceil(q.N / 256), 1, 'loraB');
+  }
+
+  gemv4Add(enc, xBuf, q, yBuf, biasBuf, moduleKey) {
+    const mod = this.lora?.modules?.[moduleKey];
+    if (mod) this._loraA(enc, xBuf, q, mod, this.s.loraD, moduleKey);
+    const meta = this._gemv4Meta(q, biasBuf, mod);
+    const key = `gemv4add:${moduleKey || 'base'}:${q.K}:${q.N}:${q.gpr}:${biasBuf ? 1 : 0}:${mod ? this._loraEpoch : 0}`;
+    const bg = this._bgCached(this.pipes.gemv4Add, [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf, meta.buf], key, { sensitive: !!mod });
+    this._dispatch(enc, this.pipes.gemv4Add, bg, meta.gx, meta.gy, `g4add:${q.N}x${q.K}`);
+  }
+
+  qkvGemv4(enc, xBuf, packed, qBuf, kBuf, vBuf, L) {
+    const gx = Math.min(packed.totalN, 65535);
+    const meta = this._staticUni(`qkv:${packed.K}:${packed.totalN}:${packed.qN}:${packed.kN}:${packed.vN}:${packed.gpr}`, new Uint32Array([packed.K, packed.totalN, packed.qN, packed.kN, packed.vN, packed.gpr, gx, 0]));
+    const bg = this._bgCached(this.pipes.qkvGemv4, [xBuf, packed.w, packed.scale, packed.bias, qBuf, kBuf, vBuf, meta], `qkv:${L.index}`, { sensitive: false });
+    this._dispatch(enc, this.pipes.qkvGemv4, bg, gx, Math.ceil(packed.totalN / gx), `qkv:${packed.totalN}x${packed.K}`);
+    for (const [part, out] of [[L.q, qBuf], [L.k, kBuf], [L.v, vBuf]]) {
+      const mod = this.lora?.modules?.[part.loraKey];
+      if (!mod) continue;
+      const q = this.q4[part.weight];
+      this._loraA(enc, xBuf, q, mod, this.s.loraD, part.loraKey);
+      this._loraBAdd(enc, out, q, mod, this.s.loraD, part.loraKey);
+    }
+  }
+
+  gateUpSiluGemv4(enc, xBuf, packed, yBuf, L) {
+    const gate = this.q4[L.gate.weight], up = this.q4[L.up.weight];
+    const gateMod = this.lora?.modules?.[L.gate.loraKey];
+    const upMod = this.lora?.modules?.[L.up.loraKey];
+    if (gateMod) this._loraA(enc, xBuf, gate, gateMod, this.s.loraD, L.gate.loraKey, 'loraA:gate');
+    if (upMod) this._loraA(enc, xBuf, up, upMod, this.s.loraD2, L.up.loraKey, 'loraA:up');
+    const gx = Math.min(packed.N, 65535);
+    const m0 = this._staticUni(`gu0:${this._loraEpoch}:${packed.K}:${packed.N}:${packed.gpr}:${gateMod ? gateMod.rank : 0}:${upMod ? upMod.rank : 0}:${gateMod ? 1 : 0}:${upMod ? 1 : 0}`, new Uint32Array([packed.K, packed.N, packed.gpr, gx, gateMod ? gateMod.rank : 0, upMod ? upMod.rank : 0, gateMod ? 1 : 0, upMod ? 1 : 0]));
+    const m1 = this._staticUni(`gu1:${this._loraEpoch}:${gateMod ? gateMod.scale : 0}:${upMod ? upMod.scale : 0}`, new Float32Array([gateMod ? gateMod.scale : 0, upMod ? upMod.scale : 0, 0, 0]));
+    const bg = this._bgCached(this.pipes.gateUpSiluGemv4, [xBuf, packed.w, packed.scale, yBuf, this.s.loraD, gateMod ? gateMod.B : this.s.dummy, this.s.loraD2, upMod ? upMod.B : this.s.dummy, m0, m1], `gu:${L.index}:${this._loraEpoch}:${gateMod ? 1 : 0}:${upMod ? 1 : 0}`, { sensitive: !!(gateMod || upMod) });
+    this._dispatch(enc, this.pipes.gateUpSiluGemv4, bg, gx, Math.ceil(packed.N / gx), `gu:${packed.N}x${packed.K}`);
+  }
   rms(enc, xBuf, gBuf, yBuf, K) {
     let u = this.u?.rmsHidden;
     if (!u || K !== this.cfg.hiddenSize) {
@@ -190,6 +315,11 @@ export class QwenWGPU {
   }
   rope(enc, xBuf, pos, nHeads) {
     this._dispatch(enc, this.pipes.rope, this._bg(this.pipes.rope, [xBuf, this.ropeCos, this.ropeSin, this._uni(new Uint32Array([nHeads, this.cfg.headDim, pos]))]), Math.ceil(nHeads*(this.cfg.headDim/2)/256), 1, 'rope');
+  }
+  ropeQK(enc, qBuf, kBuf, pos) {
+    const c = this.cfg;
+    const pairs = (c.numHeads + c.numKVHeads) * (c.headDim / 2);
+    this._dispatch(enc, this.pipes.ropeQK, this._bg(this.pipes.ropeQK, [qBuf, kBuf, this.ropeCos, this.ropeSin, this._uni(new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, pos]))]), Math.ceil(pairs / 256), 1, 'ropeQK');
   }
   attn(enc, qBuf, kc, vc, oBuf, ctx) {
     const c = this.cfg, S = this.s; const nsplit = Math.ceil(ctx / this.CHUNK);
@@ -210,22 +340,31 @@ export class QwenWGPU {
     for (let i = 0; i < c.numLayers; i++) {
       const L = this.plan.layers[i];
       this.rms(enc, S.hidden, this.bufs[L.inputNorm], S.normed, c.hiddenSize);
-      this.gemv4(enc, S.normed, this.q4[L.q.weight], S.q, this.bufs[L.q.bias], L.q.loraKey);
-      this.gemv4(enc, S.normed, this.q4[L.k.weight], S.k, this.bufs[L.k.bias], L.k.loraKey);
-      this.gemv4(enc, S.normed, this.q4[L.v.weight], S.v, this.bufs[L.v.bias], L.v.loraKey);
-      this.rope(enc, S.q, pos, c.numHeads); this.rope(enc, S.k, pos, c.numKVHeads);
+      if (this.features.fuseQKV) {
+        this.qkvGemv4(enc, S.normed, this.qkv[L.index], S.q, S.k, S.v, L);
+      } else {
+        this.gemv4(enc, S.normed, this.q4[L.q.weight], S.q, this.bufs[L.q.bias], L.q.loraKey);
+        this.gemv4(enc, S.normed, this.q4[L.k.weight], S.k, this.bufs[L.k.bias], L.k.loraKey);
+        this.gemv4(enc, S.normed, this.q4[L.v.weight], S.v, this.bufs[L.v.bias], L.v.loraKey);
+      }
+      if (this.features.fuseRoPE) this.ropeQK(enc, S.q, S.k, pos);
+      else { this.rope(enc, S.q, pos, c.numHeads); this.rope(enc, S.k, pos, c.numKVHeads); }
       // append k,v to cache at position pos
       enc.copyBufferToBuffer(S.k, 0, this.kc[i], pos * kvd * 4, kvd * 4);
       enc.copyBufferToBuffer(S.v, 0, this.vc[i], pos * kvd * 4, kvd * 4);
       this.attn(enc, S.q, this.kc[i], this.vc[i], S.attn, pos + 1);
-      this.gemv4(enc, S.attn, this.q4[L.o.weight], S.tmp, null, L.o.loraKey);
-      this._addInto(enc, S.hidden, S.tmp, c.hiddenSize);             // residual
+      if (this.features.fuseResidual) this.gemv4Add(enc, S.attn, this.q4[L.o.weight], S.hidden, null, L.o.loraKey);
+      else { this.gemv4(enc, S.attn, this.q4[L.o.weight], S.tmp, null, L.o.loraKey); this._addInto(enc, S.hidden, S.tmp, c.hiddenSize); }
       this.rms(enc, S.hidden, this.bufs[L.postAttentionNorm], S.normed, c.hiddenSize);
-      this.gemv4(enc, S.normed, this.q4[L.gate.weight], S.tmp, null, L.gate.loraKey);
-      this.gemv4(enc, S.normed, this.q4[L.up.weight], S.tmp2, null, L.up.loraKey);
-      this._siluMul(enc, S.tmp, S.tmp2, c.intermediateSize);          // tmp = silu(gate)*up
-      this.gemv4(enc, S.tmp, this.q4[L.down.weight], S.normed, null, L.down.loraKey);
-      this._addInto(enc, S.hidden, S.normed, c.hiddenSize);
+      if (this.features.fuseMLP) {
+        this.gateUpSiluGemv4(enc, S.normed, this.gateUp[L.index], S.tmp, L);
+      } else {
+        this.gemv4(enc, S.normed, this.q4[L.gate.weight], S.tmp, null, L.gate.loraKey);
+        this.gemv4(enc, S.normed, this.q4[L.up.weight], S.tmp2, null, L.up.loraKey);
+        this._siluMul(enc, S.tmp, S.tmp2, c.intermediateSize);          // tmp = silu(gate)*up
+      }
+      if (this.features.fuseResidual) this.gemv4Add(enc, S.tmp, this.q4[L.down.weight], S.hidden, null, L.down.loraKey);
+      else { this.gemv4(enc, S.tmp, this.q4[L.down.weight], S.normed, null, L.down.loraKey); this._addInto(enc, S.hidden, S.normed, c.hiddenSize); }
     }
     this.rms(enc, S.hidden, this.bufs[this.plan.finalNorm.name], S.normed, c.hiddenSize);
     this.gemv(enc, S.normed, this.q[this.plan.embed.name], S.logits, null, null); // lm_head (tied)
@@ -287,6 +426,13 @@ export class QwenWGPU {
     const mod = this.lora?.modules?.[moduleKey];
     if (mod) this.loraBatchDelta(enc, aBuf, yBuf, q, T, mod);
   }
+  gemm4AddT(enc, aBuf, q, yBuf, T, biasBuf, moduleKey) {
+    const meta = new Uint32Array([q.K, q.N, T, q.gpr, biasBuf ? 1 : 0, 0, 0, 0]);
+    const bg = this._bg(this.pipes.gemm4AddT, [aBuf, q.w, q.scale, biasBuf || this.s.dummy, yBuf, this._uni(meta)]);
+    this._dispatch(enc, this.pipes.gemm4AddT, bg, Math.ceil(q.N / 64), Math.ceil(T / 16), 'gemm4AddT');
+    const mod = this.lora?.modules?.[moduleKey];
+    if (mod) this.loraBatchDelta(enc, aBuf, yBuf, q, T, mod);
+  }
   loraBatchDelta(enc, xBuf, yBuf, q, T, mod) {
     const bgA = this._bg(this.pipes.loraABatch, [xBuf, mod.A, this.sT.loraD, this._uni(new Uint32Array([q.K, mod.rank, T, 0]))]);
     this._dispatch(enc, this.pipes.loraABatch, bgA, mod.rank, T, 'loraA:T');
@@ -301,26 +447,31 @@ export class QwenWGPU {
     const u = new ArrayBuffer(8); const dv = new DataView(u); dv.setFloat32(0, K, true); dv.setFloat32(4, this.cfg.rmsNormEps, true);
     this._dispatch(enc, this.pipes.rmsT, this._bg(this.pipes.rmsT, [xBuf, gBuf, yBuf, this._uni(new Uint8Array(u))]), T, 1, 'rmsT');
   }
-  ropeT(enc, xBuf, T, nHeads) {
+  ropeT(enc, xBuf, T, nHeads, pos0 = 0) {
     const hd = this.cfg.headDim;
-    this._dispatch(enc, this.pipes.ropeT, this._bg(this.pipes.ropeT, [xBuf, this.ropeCos, this.ropeSin, this._uni(new Uint32Array([nHeads, hd, T, 0]))]), Math.ceil(T * nHeads * (hd / 2) / 256), 1, 'ropeT');
+    this._dispatch(enc, this.pipes.ropeT, this._bg(this.pipes.ropeT, [xBuf, this.ropeCos, this.ropeSin, this._uni(new Uint32Array([nHeads, hd, T, pos0]))]), Math.ceil(T * nHeads * (hd / 2) / 256), 1, 'ropeT');
   }
-  attnPrefill(enc, qBuf, kc, vc, oBuf, T) {
+  attnPrefill(enc, qBuf, kc, vc, oBuf, T, qStart = 0, ctx = T) {
     const c = this.cfg;
-    this._dispatch(enc, this.pipes.attnPrefill, this._bg(this.pipes.attnPrefill, [qBuf, kc, vc, oBuf, this._uni(new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, T]))]), c.numHeads, T, 'attnPrefill');
+    if (this.features.prefillAttention === 'block' || qStart !== 0 || ctx !== T) {
+      const meta = new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, T, qStart, ctx, 0, 0]);
+      this._dispatch(enc, this.pipes.attnPrefillBlock, this._bg(this.pipes.attnPrefillBlock, [qBuf, kc, vc, oBuf, this._uni(meta)]), c.numHeads, Math.ceil(T / 4), 'attnPrefillBlock');
+    } else {
+      this._dispatch(enc, this.pipes.attnPrefill, this._bg(this.pipes.attnPrefill, [qBuf, kc, vc, oBuf, this._uni(new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, T]))]), c.numHeads, T, 'attnPrefill');
+    }
   }
 
   // (re)allocate prefill scratch sized to T (grows as needed; only paid when prefilling).
-  _ensurePrefillScratch(T, loraRank = 0) {
-    if (this.sTcap >= T && (this.sTLoraRank || 0) >= loraRank) return;
+  _ensurePrefillScratch(T, loraRank = 0, idsCap = T) {
+    if (this.sTcap >= T && (this.sTLoraRank || 0) >= loraRank && (this.sTidsCap || 0) >= idsCap) return;
     if (this.sT) for (const k in this.sT) this.sT[k].destroy();
     const c = this.cfg, H = c.hiddenSize, qd = c.numHeads * c.headDim, kvd = c.numKVHeads * c.headDim, I = c.intermediateSize;
     this.sT = {
       hidden: this._buf(T * H * 4), normed: this._buf(T * H * 4), q: this._buf(T * qd * 4), k: this._buf(T * kvd * 4), v: this._buf(T * kvd * 4),
-      attn: this._buf(T * qd * 4), tmp: this._buf(T * I * 4), tmp2: this._buf(T * I * 4), ids: this._buf(T * 4),
+      attn: this._buf(T * qd * 4), tmp: this._buf(T * I * 4), tmp2: this._buf(T * I * 4), ids: this._buf(idsCap * 4),
       loraD: this._buf(Math.max(1, T * Math.max(1, loraRank)) * 4),
     };
-    this.sTcap = T; this.sTLoraRank = loraRank;
+    this.sTcap = T; this.sTLoraRank = loraRank; this.sTidsCap = idsCap;
   }
 
   _activeMaxLoraRank() {
@@ -334,15 +485,22 @@ export class QwenWGPU {
   // Prefill the prompt (positions 0..T-1). Leaves last-row logits in s.logits and the
   // KV cache populated, so decode continues from pos=T. T must be <= maxPrefillT.
   prefillBatch(ids) {
-    const c = this.cfg, S = this.s, T = ids.length, hd = c.headDim, kvd = c.numKVHeads * hd, H = c.hiddenSize;
+    const T = ids.length;
     if (T > this.maxPrefillT) throw new Error(`prompt ${T} > maxPrefillT ${this.maxPrefillT}`);
     if (T > this.maxCtx) throw new Error(`prompt ${T} > maxCtx ${this.maxCtx}`);
+    const chunk = this.features.prefillChunkSize;
+    if (chunk > 0 && T > chunk) return this._prefillChunked(ids, chunk);
+    return this._prefillFull(ids);
+  }
+
+  _prefillFull(ids) {
+    const c = this.cfg, S = this.s, T = ids.length, hd = c.headDim, kvd = c.numKVHeads * hd, H = c.hiddenSize;
     this._ensurePrefillScratch(T, this._activeMaxLoraRank()); const ST = this.sT;
     this._resetUni();
     this.dev.queue.writeBuffer(ST.ids, 0, new Uint32Array(ids));
     const enc = this.dev.createCommandEncoder();
     const e = this.q[this.plan.embed.name];
-    this._dispatch(enc, this.pipes.embedT, this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, this._uni(new Uint32Array([T, H]))]), Math.min(Math.ceil(T * H / 256), 65535), 1, 'embedT');
+    this._dispatch(enc, this.pipes.embedT, this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, this._uni(new Uint32Array([T, H, 0, 0]))]), Math.min(Math.ceil(T * H / 256), 65535), 1, 'embedT');
     for (let i = 0; i < c.numLayers; i++) {
       const L = this.plan.layers[i];
       this.rmsT(enc, ST.hidden, this.bufs[L.inputNorm], ST.normed, T, H);
@@ -352,18 +510,58 @@ export class QwenWGPU {
       this.ropeT(enc, ST.q, T, c.numHeads); this.ropeT(enc, ST.k, T, c.numKVHeads);
       enc.copyBufferToBuffer(ST.k, 0, this.kc[i], 0, T * kvd * 4);
       enc.copyBufferToBuffer(ST.v, 0, this.vc[i], 0, T * kvd * 4);
-      this.attnPrefill(enc, ST.q, this.kc[i], this.vc[i], ST.attn, T);
-      this.gemm4(enc, ST.attn, this.q4[L.o.weight], ST.tmp, T, null, L.o.loraKey);
-      this._addInto(enc, ST.hidden, ST.tmp, T * H);
+      this.attnPrefill(enc, ST.q, this.kc[i], this.vc[i], ST.attn, T, 0, T);
+      if (this.features.fuseResidual) this.gemm4AddT(enc, ST.attn, this.q4[L.o.weight], ST.hidden, T, null, L.o.loraKey);
+      else { this.gemm4(enc, ST.attn, this.q4[L.o.weight], ST.tmp, T, null, L.o.loraKey); this._addInto(enc, ST.hidden, ST.tmp, T * H); }
       this.rmsT(enc, ST.hidden, this.bufs[L.postAttentionNorm], ST.normed, T, H);
       this.gemm4(enc, ST.normed, this.q4[L.gate.weight], ST.tmp, T, null, L.gate.loraKey);
       this.gemm4(enc, ST.normed, this.q4[L.up.weight], ST.tmp2, T, null, L.up.loraKey);
       this._siluMul(enc, ST.tmp, ST.tmp2, T * c.intermediateSize);
-      this.gemm4(enc, ST.tmp, this.q4[L.down.weight], ST.normed, T, null, L.down.loraKey);
-      this._addInto(enc, ST.hidden, ST.normed, T * H);
+      if (this.features.fuseResidual) this.gemm4AddT(enc, ST.tmp, this.q4[L.down.weight], ST.hidden, T, null, L.down.loraKey);
+      else { this.gemm4(enc, ST.tmp, this.q4[L.down.weight], ST.normed, T, null, L.down.loraKey); this._addInto(enc, ST.hidden, ST.normed, T * H); }
     }
     // last row -> final norm -> lm_head (reuse decode single-row kernels)
     enc.copyBufferToBuffer(ST.hidden, (T - 1) * H * 4, S.hidden, 0, H * 4);
+    this.rms(enc, S.hidden, this.bufs[this.plan.finalNorm.name], S.normed, H);
+    this.gemv(enc, S.normed, this.q[this.plan.embed.name], S.logits, null, null);
+    this.dev.queue.submit([enc.finish()]);
+  }
+
+  _prefillChunked(ids, chunkSize) {
+    const c = this.cfg, S = this.s, H = c.hiddenSize, hd = c.headDim, kvd = c.numKVHeads * hd;
+    const T = ids.length;
+    this._ensurePrefillScratch(Math.min(chunkSize, T), this._activeMaxLoraRank(), T); const ST = this.sT;
+    this._resetUni();
+    this.dev.queue.writeBuffer(ST.ids, 0, new Uint32Array(ids));
+    const enc = this.dev.createCommandEncoder();
+    const e = this.q[this.plan.embed.name];
+    for (let off = 0; off < T; off += chunkSize) {
+      const end = Math.min(T, off + chunkSize);
+      const CT = end - off;
+      this._dispatch(enc, this.pipes.embedT, this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, this._uni(new Uint32Array([CT, H, off, 0]))]), Math.min(Math.ceil(CT * H / 256), 65535), 1, 'embedT');
+      for (let i = 0; i < c.numLayers; i++) {
+        const L = this.plan.layers[i];
+        this.rmsT(enc, ST.hidden, this.bufs[L.inputNorm], ST.normed, CT, H);
+        this.gemm4(enc, ST.normed, this.q4[L.q.weight], ST.q, CT, this.bufs[L.q.bias], L.q.loraKey);
+        this.gemm4(enc, ST.normed, this.q4[L.k.weight], ST.k, CT, this.bufs[L.k.bias], L.k.loraKey);
+        this.gemm4(enc, ST.normed, this.q4[L.v.weight], ST.v, CT, this.bufs[L.v.bias], L.v.loraKey);
+        this.ropeT(enc, ST.q, CT, c.numHeads, off); this.ropeT(enc, ST.k, CT, c.numKVHeads, off);
+        enc.copyBufferToBuffer(ST.k, 0, this.kc[i], off * kvd * 4, CT * kvd * 4);
+        enc.copyBufferToBuffer(ST.v, 0, this.vc[i], off * kvd * 4, CT * kvd * 4);
+        this.attnPrefill(enc, ST.q, this.kc[i], this.vc[i], ST.attn, CT, off, end);
+        if (this.features.fuseResidual) this.gemm4AddT(enc, ST.attn, this.q4[L.o.weight], ST.hidden, CT, null, L.o.loraKey);
+        else { this.gemm4(enc, ST.attn, this.q4[L.o.weight], ST.tmp, CT, null, L.o.loraKey); this._addInto(enc, ST.hidden, ST.tmp, CT * H); }
+        this.rmsT(enc, ST.hidden, this.bufs[L.postAttentionNorm], ST.normed, CT, H);
+        this.gemm4(enc, ST.normed, this.q4[L.gate.weight], ST.tmp, CT, null, L.gate.loraKey);
+        this.gemm4(enc, ST.normed, this.q4[L.up.weight], ST.tmp2, CT, null, L.up.loraKey);
+        this._siluMul(enc, ST.tmp, ST.tmp2, CT * c.intermediateSize);
+        if (this.features.fuseResidual) this.gemm4AddT(enc, ST.tmp, this.q4[L.down.weight], ST.hidden, CT, null, L.down.loraKey);
+        else { this.gemm4(enc, ST.tmp, this.q4[L.down.weight], ST.normed, CT, null, L.down.loraKey); this._addInto(enc, ST.hidden, ST.normed, CT * H); }
+      }
+      if (end === T) {
+        enc.copyBufferToBuffer(ST.hidden, (CT - 1) * H * 4, S.hidden, 0, H * 4);
+      }
+    }
     this.rms(enc, S.hidden, this.bufs[this.plan.finalNorm.name], S.normed, H);
     this.gemv(enc, S.normed, this.q[this.plan.embed.name], S.logits, null, null);
     this.dev.queue.submit([enc.finish()]);
