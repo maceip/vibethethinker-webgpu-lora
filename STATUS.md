@@ -87,7 +87,9 @@ than sequential). T>1 kernels: `GEMM4`, `RMSNORM_T` (one wg/row), `ROPE_T`, `EMB
 - **`ADD`/`SILUMUL`/`EMBED_T` are grid-stride** (use `num_workgroups`): at T=8192, n reaches
   T·I≈90M → 352k workgroups, far past the 65535/dim dispatch limit; grid-stride + a 65535
   cap covers any n. (Backward-compatible: decode's tiny n loops once.)
-- `prefillBatch(ids)`: lazy scratch sized to the prompt (grows on demand). maxPrefillT=8192.
+- Context + prefill are configurable: `new QwenWGPU(dev, cfg, { maxCtx, maxPrefillT })`
+  (default 8192/8192; base VibeThinker-3B allows up to 128K — KV cache ~72KB/token is the cost).
+  `prefillBatch(ids)`: lazy scratch sized to the prompt. Verified maxCtx=16384 prefills 9000 tokens.
 - Validated in-browser: batched == sequential bit-exact at L=16/17/256/257/512/1024
   (incl. multi-block flash, ctx>256); 4096 prefill 6.6s, 8192 prefill 20s, both finite +
   valid argmax. GEMM verified vs CPU (err 2.5e-6). Decode/LoRA still match HF after the

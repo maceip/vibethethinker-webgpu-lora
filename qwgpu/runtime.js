@@ -12,7 +12,9 @@ const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsag
 const UNIFORM = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
 export class QwenWGPU {
-  constructor(device, cfg) { this.dev = device; this.cfg = cfg; this.lora = null; this.bufs = {}; }
+  // opts: { maxCtx, maxPrefillT } — context window + batched-prefill cap (default 8192 each;
+  // raise toward the base model's limit, e.g. 32768, memory permitting — KV cache grows linearly).
+  constructor(device, cfg, opts = {}) { this.dev = device; this.cfg = cfg; this.lora = null; this.bufs = {}; this.opts = opts; }
 
   _buf(size, usage = STORAGE) { return this.dev.createBuffer({ size, usage }); }
   _f32(arr, usage = STORAGE) { const b = this._buf(arr.byteLength, usage); this.dev.queue.writeBuffer(b, 0, arr); return b; }
@@ -35,7 +37,9 @@ export class QwenWGPU {
   // `source` is a base URL string OR a reader { range, text } (e.g. hfReader/fileReader).
   async build(source, onProgress = () => {}) {
     const dev = this.dev, c = this.cfg;
-    this.CHUNK = 128; this.MAXBATCH = 16; this.maxPrefillT = 8192;
+    this.CHUNK = 128; this.MAXBATCH = 16;
+    this.maxCtx = this.opts.maxCtx || 8192;                       // context window (KV cache length)
+    this.maxPrefillT = Math.min(this.opts.maxPrefillT || 8192, this.maxCtx); // batched-prefill cap (<= ctx)
     this.pipes = { gemv: this._pipe(GEMV), loraA: this._pipe(LORA_A), rms: this._pipe(RMSNORM), rope: this._pipe(ROPE), attnP: this._pipe(ATTN_PARTIAL), attnC: this._pipe(ATTN_COMBINE), add: this._pipe(ADD), silu: this._pipe(SILUMUL), embed: this._pipe(EMBED), embedBuf: this._pipe(EMBED_BUF), argmax: this._pipe(ARGMAX), gemv4: this._pipe(GEMV4),
       gemm4: this._pipe(GEMM4), rmsT: this._pipe(RMSNORM_T), ropeT: this._pipe(ROPE_T), embedT: this._pipe(EMBED_T), attnPrefill: this._pipe(ATTN_PREFILL) };
     onProgress('loading f32 weights', 0);
@@ -55,8 +59,7 @@ export class QwenWGPU {
       for (const b of ['q', 'k', 'v']) f32buf(`${p}.self_attn.${b}_proj.bias`);
       if (i % 6 === 0) await new Promise(r => setTimeout(r, 0));
     }
-    // Context window: thinking model emits ~4k tokens, so size generously.
-    this.maxCtx = 8192;
+    // Context window (this.maxCtx) set above from opts; RoPE tables + KV cache sized to it.
     this._buildRope(this.maxCtx);
     // KV cache (f32) per layer
     this.kc = [], this.vc = [];

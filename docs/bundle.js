@@ -35185,11 +35185,14 @@ function fileReader(fileMap) {
 var STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
 var UNIFORM = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 var QwenWGPU = class {
-  constructor(device, cfg) {
+  // opts: { maxCtx, maxPrefillT } — context window + batched-prefill cap (default 8192 each;
+  // raise toward the base model's limit, e.g. 32768, memory permitting — KV cache grows linearly).
+  constructor(device, cfg, opts = {}) {
     this.dev = device;
     this.cfg = cfg;
     this.lora = null;
     this.bufs = {};
+    this.opts = opts;
   }
   _buf(size, usage = STORAGE) {
     return this.dev.createBuffer({ size, usage });
@@ -35231,7 +35234,8 @@ var QwenWGPU = class {
     const dev2 = this.dev, c = this.cfg;
     this.CHUNK = 128;
     this.MAXBATCH = 16;
-    this.maxPrefillT = 8192;
+    this.maxCtx = this.opts.maxCtx || 8192;
+    this.maxPrefillT = Math.min(this.opts.maxPrefillT || 8192, this.maxCtx);
     this.pipes = {
       gemv: this._pipe(GEMV),
       loraA: this._pipe(LORA_A),
@@ -35280,7 +35284,6 @@ var QwenWGPU = class {
       for (const b of ["q", "k", "v"]) f32buf(`${p}.self_attn.${b}_proj.bias`);
       if (i % 6 === 0) await new Promise((r) => setTimeout(r, 0));
     }
-    this.maxCtx = 8192;
     this._buildRope(this.maxCtx);
     this.kc = [], this.vc = [];
     const kvSize = c.numKVHeads * this.maxCtx * c.headDim * 4;
