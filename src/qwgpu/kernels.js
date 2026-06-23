@@ -603,7 +603,7 @@ var<workgroup> bv: array<f32,256>; var<workgroup> bi: array<u32,256>;
 @compute @workgroup_size(256)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   let tid = lid.x; var v = -1e30; var idx = 0xffffffffu;
-  for (var i = tid; i < n; i = i + 256u) { let x = logits[i]; if (x > v || (x == v && i < idx)) { v = x; idx = i; } }
+  for (var i = tid; i < n; i = i + 256u) { let x = logits[i]; if (x == x && (x > v || (x == v && i < idx))) { v = x; idx = i; } }
   bv[tid] = v; bi[tid] = idx; workgroupBarrier();
   for (var s = 128u; s > 0u; s = s/2u) { if (tid < s) { let ov = bv[tid+s]; let oi = bi[tid+s]; if (ov > bv[tid] || (ov == bv[tid] && oi < bi[tid])) { bv[tid] = ov; bi[tid] = oi; } } workgroupBarrier(); }
   if (tid == 0u) { out[0] = bi[0]; }
@@ -629,7 +629,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   var v = -1e30; var idx = 0xffffffffu;
   for (var i = tid; i < n; i = i + 256u) {
     let x = logits[i];
-    if (!alreadySelected(i, selected) && (x > v || (x == v && i < idx))) { v = x; idx = i; }
+    if (x == x && !alreadySelected(i, selected) && (x > v || (x == v && i < idx))) { v = x; idx = i; }
   }
   bv[tid] = v; bi[tid] = idx; workgroupBarrier();
   for (var s = 128u; s > 0u; s = s/2u) {
@@ -640,6 +640,138 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     workgroupBarrier();
   }
   if (tid == 0u) { ids[selected] = bi[0]; vals[selected] = bv[0]; }
+}`;
+
+// First stage for exact two-stage top-k. Each workgroup scans one 256-token
+// vocab tile once, selects that tile's local top-k in workgroup memory, and
+// emits candidates for a much smaller global merge pass.
+export const TOPK_LOCAL = `
+struct Meta { vocabSize:u32, k:u32, tileSize:u32, pad:u32 };
+@group(0) @binding(0) var<storage,read> logits: array<f32>;
+@group(0) @binding(1) var<storage,read_write> localIds: array<u32>;
+@group(0) @binding(2) var<storage,read_write> localVals: array<f32>;
+@group(0) @binding(3) var<uniform> m: Meta;
+var<workgroup> rawVals: array<f32,256>;
+var<workgroup> rawIds: array<u32,256>;
+var<workgroup> bv: array<f32,256>;
+var<workgroup> bi: array<u32,256>;
+var<workgroup> picked: array<u32,64>;
+
+fn better(av: f32, ai: u32, bv_: f32, bi_: u32) -> bool {
+  return av > bv_ || (av == bv_ && ai < bi_);
+}
+
+fn selected(id: u32, n: u32) -> bool {
+  for (var j = 0u; j < n; j = j + 1u) {
+    if (picked[j] == id) { return true; }
+  }
+  return false;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let tid = lid.x;
+  let i = wid.x * m.tileSize + tid;
+  var v = -1e30;
+  var idx = 0xffffffffu;
+  if (i < m.vocabSize) {
+    let x = logits[i];
+    if (x == x) {
+      v = x;
+      idx = i;
+    }
+  }
+  rawVals[tid] = v;
+  rawIds[tid] = idx;
+  workgroupBarrier();
+
+  for (var rank = 0u; rank < 64u; rank = rank + 1u) {
+    if (rank >= m.k) { break; }
+    var tv = rawVals[tid];
+    var ti = rawIds[tid];
+    if (ti == 0xffffffffu || selected(ti, rank)) {
+      tv = -1e30;
+      ti = 0xffffffffu;
+    }
+    bv[tid] = tv;
+    bi[tid] = ti;
+    workgroupBarrier();
+    for (var s = 128u; s > 0u; s = s / 2u) {
+      if (tid < s) {
+        let ov = bv[tid + s];
+        let oi = bi[tid + s];
+        if (better(ov, oi, bv[tid], bi[tid])) {
+          bv[tid] = ov;
+          bi[tid] = oi;
+        }
+      }
+      workgroupBarrier();
+    }
+    if (tid == 0u) {
+      picked[rank] = bi[0];
+      let out = wid.x * m.k + rank;
+      localIds[out] = bi[0];
+      localVals[out] = bv[0];
+    }
+    workgroupBarrier();
+  }
+}`;
+
+// Second stage for exact two-stage top-k. This reuses the repeated selector
+// shape, but scans only block-local candidates instead of the full vocab.
+export const TOPK_MERGE_SELECT = `
+@group(0) @binding(0) var<storage,read> localIds: array<u32>;
+@group(0) @binding(1) var<storage,read> localVals: array<f32>;
+@group(0) @binding(2) var<storage,read_write> ids: array<u32>;
+@group(0) @binding(3) var<storage,read_write> vals: array<f32>;
+@group(0) @binding(4) var<uniform> m: vec2<u32>; // candidateCount, selectedCount
+var<workgroup> bv: array<f32,256>;
+var<workgroup> bi: array<u32,256>;
+
+fn alreadySelected(id: u32, n: u32) -> bool {
+  for (var j = 0u; j < n; j = j + 1u) {
+    if (ids[j] == id) { return true; }
+  }
+  return false;
+}
+
+fn better(av: f32, ai: u32, bv_: f32, bi_: u32) -> bool {
+  return av > bv_ || (av == bv_ && ai < bi_);
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let tid = lid.x;
+  let n = m.x;
+  let selected = m.y;
+  var v = -1e30;
+  var idx = 0xffffffffu;
+  for (var i = tid; i < n; i = i + 256u) {
+    let id = localIds[i];
+    let x = localVals[i];
+    if (id != 0xffffffffu && !alreadySelected(id, selected) && x == x && better(x, id, v, idx)) {
+      v = x;
+      idx = id;
+    }
+  }
+  bv[tid] = v;
+  bi[tid] = idx;
+  workgroupBarrier();
+  for (var s = 128u; s > 0u; s = s / 2u) {
+    if (tid < s) {
+      let ov = bv[tid + s];
+      let oi = bi[tid + s];
+      if (better(ov, oi, bv[tid], bi[tid])) {
+        bv[tid] = ov;
+        bi[tid] = oi;
+      }
+    }
+    workgroupBarrier();
+  }
+  if (tid == 0u) {
+    ids[selected] = bi[0];
+    vals[selected] = bv[0];
+  }
 }`;
 
 // int4 group-128 GEMV. w: [N][K/8] (8 signed nibbles/word). scale: [N][gpr].

@@ -24,7 +24,7 @@ window.run = async () => {
   const dev = await requestDevice();
   dev.addEventListener?.('uncapturederror', e => console.log('VWG GPUERR ' + e.error.message.slice(0, 160)));
   const ref = await (await fetch('./ref.json')).json();
-  const rt = new QwenWGPU(dev, QWEN25_3B, { samplingTopK: 16, maxSamplingTopK: 32 });
+  const rt = new QwenWGPU(dev, QWEN25_3B, { samplingTopK: 16, maxSamplingTopK: 64, topKAlgorithm: 'two-stage' });
   await rt.build('/model');
   console.log('VWG built samplingTopK=' + rt.samplingTopK);
 
@@ -34,10 +34,12 @@ window.run = async () => {
   console.log('VWG top1=' + top1[0].id + ' argmax=' + argmax + ' ' + (top1[0].id === argmax ? 'PASS' : 'FAIL'));
 
   const top8 = await rt.topKLogits(8);
+  const repeated8 = await rt.topKLogitsRepeated(8);
+  const exact = top8.every((x, i) => x.id === repeated8[i].id && Object.is(x.logit, repeated8[i].logit));
   const unique = new Set(top8.map(x => x.id)).size === top8.length;
   const finite = top8.every(x => Number.isFinite(x.logit) && x.id < QWEN25_3B.vocabSize);
   const sorted = top8.every((x, i, a) => i === 0 || a[i - 1].logit >= x.logit);
-  console.log('VWG top8 unique=' + unique + ' finite=' + finite + ' sorted=' + sorted + ' ' + (unique && finite && sorted ? 'PASS' : 'FAIL'));
+  console.log('VWG top8 unique=' + unique + ' finite=' + finite + ' sorted=' + sorted + ' exact=' + exact + ' ' + (unique && finite && sorted && exact ? 'PASS' : 'FAIL'));
 
   let pos = ref.ids.length, next = pick(top8);
   const got = [];
@@ -51,7 +53,7 @@ window.run = async () => {
   console.log('VWG sampled ids=' + JSON.stringify(got));
   console.log('VWG sampled top-k readback bytes/token=' + (16 * 8));
   console.log('VWG SAMPLING SPEED ' + (got.length / dt).toFixed(1) + ' tok/s');
-  console.log('VWG ' + (top1[0].id === argmax && unique && finite && sorted ? 'SAMPLING PASS' : 'SAMPLING FAIL'));
+  console.log('VWG ' + (top1[0].id === argmax && unique && finite && sorted && exact ? 'SAMPLING PASS' : 'SAMPLING FAIL'));
   console.log('VWG DONE');
 };
 
