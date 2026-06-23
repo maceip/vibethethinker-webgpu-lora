@@ -35086,6 +35086,216 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   }
 }`;
 
+// src/qwgpu/model_schema.js
+var arrEq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+function projDesc(layer, subpath, outDim, inDim, { bias = false } = {}) {
+  const name = `model.layers.${layer}.${subpath}.weight`;
+  const m = subpath.match(/^(self_attn|mlp)\.(.+)$/);
+  const loraKey = `layers.${layer}.${m[1]}.${m[2]}`;
+  return {
+    name,
+    role: "projection",
+    quant: "int4",
+    shape: [outDim, inDim],
+    loraKey,
+    biasName: bias ? name.replace(/\.weight$/, ".bias") : null
+  };
+}
+function f32Desc(name, shape, role = "f32") {
+  return { name, role, quant: "f32", shape };
+}
+function createQwenSchema(cfg) {
+  if (!cfg.tieWordEmbeddings && cfg.tieWordEmbeddings !== void 0) {
+    throw new Error("QwenWGPU currently requires tied input/output embeddings");
+  }
+  const H = cfg.hiddenSize;
+  const QD = cfg.numHeads * cfg.headDim;
+  const KVD = cfg.numKVHeads * cfg.headDim;
+  const I = cfg.intermediateSize;
+  const tensors = [];
+  const layers = [];
+  const add = (d) => {
+    tensors.push(d);
+    return d;
+  };
+  const embed = add({ name: "model.embed_tokens.weight", role: "embedding", quant: "int8", shape: [cfg.vocabSize, H] });
+  const finalNorm = add(f32Desc("model.norm.weight", [H], "final_norm"));
+  for (let i = 0; i < cfg.numLayers; i++) {
+    const p = `model.layers.${i}`;
+    const layer = {
+      index: i,
+      inputNorm: add(f32Desc(`${p}.input_layernorm.weight`, [H], "input_norm")),
+      postAttentionNorm: add(f32Desc(`${p}.post_attention_layernorm.weight`, [H], "post_attention_norm")),
+      projections: {},
+      biases: {}
+    };
+    layer.projections.q = add(projDesc(i, "self_attn.q_proj", QD, H, { bias: !!cfg.attentionBias }));
+    layer.projections.k = add(projDesc(i, "self_attn.k_proj", KVD, H, { bias: !!cfg.attentionBias }));
+    layer.projections.v = add(projDesc(i, "self_attn.v_proj", KVD, H, { bias: !!cfg.attentionBias }));
+    layer.projections.o = add(projDesc(i, "self_attn.o_proj", H, QD));
+    layer.projections.gate = add(projDesc(i, "mlp.gate_proj", I, H));
+    layer.projections.up = add(projDesc(i, "mlp.up_proj", I, H));
+    layer.projections.down = add(projDesc(i, "mlp.down_proj", H, I));
+    for (const key of ["q", "k", "v"]) {
+      const proj = layer.projections[key];
+      if (proj.biasName) {
+        const bias = add(f32Desc(proj.biasName, [proj.shape[0]], `${key}_bias`));
+        layer.biases[key] = bias;
+      }
+    }
+    layers.push(layer);
+  }
+  const byName = new Map(tensors.map((t) => [t.name, t]));
+  const expectedNames = new Set(byName.keys());
+  return {
+    cfg,
+    tensors,
+    byName,
+    expectedNames,
+    layers,
+    embed,
+    finalNorm,
+    projectionDescs: tensors.filter((t) => t.role === "projection"),
+    validateTensor(name, shape) {
+      const desc = byName.get(name);
+      if (!desc) return null;
+      if (!arrEq(shape, desc.shape)) {
+        throw new Error(`shape mismatch for ${name}: got [${shape.join(",")}], expected [${desc.shape.join(",")}]`);
+      }
+      return desc;
+    },
+    assertComplete(seen) {
+      const missing = [];
+      for (const name of expectedNames) if (!seen.has(name)) missing.push(name);
+      if (missing.length) {
+        const sample2 = missing.slice(0, 12).join(", ");
+        throw new Error(`missing ${missing.length} required tensor(s): ${sample2}${missing.length > 12 ? ", \u2026" : ""}`);
+      }
+    }
+  };
+}
+function moduleKeyFromTensorName(name) {
+  const m = name.match(/layers\.(\d+)\.(self_attn|mlp)\.([a-z_]+?)(_proj)?\.(lora_[ABab])/i);
+  if (!m) return null;
+  return `layers.${m[1]}.${m[2]}.${m[3].replace(/_proj$/, "")}_proj`;
+}
+
+// src/readers.js
+function urlReader(baseUrl, headers = {}) {
+  const base = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
+  return {
+    async range(path, start, end) {
+      const r = await fetch(base + path, { headers: { ...headers, Range: `bytes=${start}-${end - 1}` } });
+      if (!r.ok && r.status !== 206) throw new Error(`range ${path} ${start}-${end}: ${r.status}`);
+      return await r.arrayBuffer();
+    },
+    async text(path) {
+      const r = await fetch(base + path, { headers });
+      if (!r.ok) throw new Error(`fetch ${path}: ${r.status}`);
+      return await r.text();
+    }
+  };
+}
+function hfReader(repo, token = "", rev = "main") {
+  return urlReader(`https://huggingface.co/${repo}/resolve/${rev}`, token ? { Authorization: `Bearer ${token}` } : {});
+}
+function fileReader(fileMap) {
+  const pick2 = (path) => fileMap[path] || fileMap[path.split("/").pop()];
+  return {
+    async range(path, start, end) {
+      const f = pick2(path);
+      if (!f) throw new Error(`file not provided: ${path}`);
+      return await f.slice(start, end).arrayBuffer();
+    },
+    async text(path) {
+      const f = pick2(path);
+      if (!f) throw new Error(`file not provided: ${path}`);
+      return await f.text();
+    }
+  };
+}
+
+// src/qwgpu/safetensors_loader.js
+function decodeBf16ToF32(u8, numel) {
+  const u16 = new Uint16Array(u8.buffer, u8.byteOffset, numel);
+  const out = new Float32Array(numel);
+  const o32 = new Uint32Array(out.buffer);
+  for (let i = 0; i < numel; i++) o32[i] = u16[i] << 16;
+  return out;
+}
+function decodeF16ToF32(u8, numel) {
+  const u16 = new Uint16Array(u8.buffer, u8.byteOffset, numel);
+  const out = new Float32Array(numel);
+  for (let i = 0; i < numel; i++) {
+    const h = u16[i], s = (h & 32768) >> 15, e = (h & 31744) >> 10, f = h & 1023;
+    if (e === 0) out[i] = (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+    else if (e === 31) out[i] = f ? NaN : s ? -Infinity : Infinity;
+    else out[i] = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+  }
+  return out;
+}
+function decodeF32(u8, numel) {
+  return new Float32Array(u8.buffer.slice(u8.byteOffset, u8.byteOffset + numel * 4));
+}
+var DECODERS = {
+  BF16: decodeBf16ToF32,
+  F16: decodeF16ToF32,
+  FP16: decodeF16ToF32,
+  F32: decodeF32,
+  FP32: decodeF32
+};
+async function loadIndex(reader) {
+  try {
+    const idx = JSON.parse(await reader.text("model.safetensors.index.json"));
+    return { weightMap: idx.weight_map || {}, shards: [...new Set(Object.values(idx.weight_map || {}))] };
+  } catch {
+    return { weightMap: null, shards: ["model.safetensors"] };
+  }
+}
+function shardPlan(shards, weightMap, names) {
+  if (!weightMap || !names) return new Map(shards.map((shard) => [shard, null]));
+  const plan = /* @__PURE__ */ new Map();
+  for (const name of names) {
+    const shard = weightMap[name];
+    if (!shard) continue;
+    if (!plan.has(shard)) plan.set(shard, /* @__PURE__ */ new Set());
+    plan.get(shard).add(name);
+  }
+  return plan;
+}
+async function streamSafetensors(source, { names = null, onTensor, onProgress = () => {
+} } = {}) {
+  if (!onTensor) throw new Error("streamSafetensors requires onTensor");
+  const reader = typeof source === "string" ? urlReader(source) : source;
+  const { weightMap, shards } = await loadIndex(reader);
+  const plan = shardPlan(shards, weightMap, names);
+  let visited = 0;
+  const total = names?.size || 0;
+  for (const [shard, wantedInShard] of plan) {
+    const lenBuf = await reader.range(shard, 0, 8);
+    const headerLen = Number(new DataView(lenBuf).getBigUint64(0, true));
+    const hdrBuf = await reader.range(shard, 8, 8 + headerLen);
+    const header = JSON.parse(new TextDecoder().decode(new Uint8Array(hdrBuf)));
+    const dataStart = 8 + headerLen;
+    const allNames = Object.keys(header).filter((k2) => k2 !== "__metadata__");
+    const tensorNames = wantedInShard ? allNames.filter((n) => wantedInShard.has(n)) : names ? allNames.filter((n) => names.has(n)) : allNames;
+    for (const name of tensorNames) {
+      const t = header[name];
+      if (!t) continue;
+      const dtype = String(t.dtype || "").toUpperCase();
+      const dec = DECODERS[dtype];
+      if (!dec) throw new Error(`unsupported dtype ${dtype} for ${name}`);
+      const numel = t.shape.reduce((a, b) => a * b, 1);
+      const [s, e] = t.data_offsets;
+      const buf = await reader.range(shard, dataStart + s, dataStart + e);
+      const data = dec(new Uint8Array(buf), numel);
+      await onTensor({ name, shape: t.shape, dtype, data, shard });
+      visited++;
+      onProgress(name, total ? Math.min(0.95, visited / total) : 0.3);
+    }
+  }
+}
+
 // src/qwgpu/quantize.js
 function quantizeInt8RowMajor(f322, outDim, inDim) {
   const scale = new Float32Array(outDim);
@@ -35146,40 +35356,39 @@ function quantizeInt4Group(f322, outDim, inDim, group = 128) {
   return { packed, scale, groupsPerRow };
 }
 
-// src/readers.js
-function urlReader(baseUrl, headers = {}) {
-  const base = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
-  return {
-    async range(path, start, end) {
-      const r = await fetch(base + path, { headers: { ...headers, Range: `bytes=${start}-${end - 1}` } });
-      if (!r.ok && r.status !== 206) throw new Error(`range ${path} ${start}-${end}: ${r.status}`);
-      return await r.arrayBuffer();
-    },
-    async text(path) {
-      const r = await fetch(base + path, { headers });
-      if (!r.ok) throw new Error(`fetch ${path}: ${r.status}`);
-      return await r.text();
+// src/qwgpu/model_uploader.js
+var ModelUploader = class {
+  constructor({ schema, q, q4, bufs, uploadF32, uploadU32, groupSize = 128 }) {
+    this.schema = schema;
+    this.q = q;
+    this.q4 = q4;
+    this.bufs = bufs;
+    this.uploadF32 = uploadF32;
+    this.uploadU32 = uploadU32;
+    this.groupSize = groupSize;
+    this.seen = /* @__PURE__ */ new Set();
+  }
+  visit({ name, shape, data }) {
+    const desc = this.schema.validateTensor(name, shape);
+    if (!desc) return;
+    if (this.seen.has(name)) throw new Error(`duplicate tensor ${name}`);
+    if (desc.quant === "int8") {
+      const { packed, scale } = quantizeInt8RowMajor(data, shape[0], shape[1]);
+      this.q[name] = { w: this.uploadU32(packed), scale: this.uploadF32(scale), N: shape[0], K: shape[1] };
+    } else if (desc.quant === "int4") {
+      const { packed, scale, groupsPerRow } = quantizeInt4Group(data, shape[0], shape[1], this.groupSize);
+      this.q4[name] = { w: this.uploadU32(packed), scale: this.uploadF32(scale), N: shape[0], K: shape[1], gpr: groupsPerRow, desc };
+    } else if (desc.quant === "f32") {
+      this.bufs[name] = this.uploadF32(data);
+    } else {
+      throw new Error(`unsupported quant mode ${desc.quant} for ${name}`);
     }
-  };
-}
-function hfReader(repo, token = "", rev = "main") {
-  return urlReader(`https://huggingface.co/${repo}/resolve/${rev}`, token ? { Authorization: `Bearer ${token}` } : {});
-}
-function fileReader(fileMap) {
-  const pick2 = (path) => fileMap[path] || fileMap[path.split("/").pop()];
-  return {
-    async range(path, start, end) {
-      const f = pick2(path);
-      if (!f) throw new Error(`file not provided: ${path}`);
-      return await f.slice(start, end).arrayBuffer();
-    },
-    async text(path) {
-      const f = pick2(path);
-      if (!f) throw new Error(`file not provided: ${path}`);
-      return await f.text();
-    }
-  };
-}
+    this.seen.add(name);
+  }
+  finalize() {
+    this.schema.assertComplete(this.seen);
+  }
+};
 
 // src/qwgpu/runtime.js
 var STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
@@ -35255,35 +35464,28 @@ var QwenWGPU = class {
       embedT: this._pipe(EMBED_T),
       attnPrefill: this._pipe(ATTN_PREFILL)
     };
-    onProgress("loading f32 weights", 0);
-    const W = await this._loadRaw(source, onProgress);
-    onProgress("quantizing to int8 + uploading", 0.5);
+    onProgress("streaming + quantizing weights", 0);
+    this.schema = createQwenSchema(c);
+    this.layers = this.schema.layers;
     this.q = {};
     this.q4 = {};
-    const quant4 = (name) => {
-      const t = W[name];
-      const { packed, scale, groupsPerRow } = quantizeInt4Group(t.data, t.shape[0], t.shape[1], 128);
-      this.q4[name] = { w: this._u32(packed), scale: this._f32(scale), N: t.shape[0], K: t.shape[1], gpr: groupsPerRow };
-    };
-    const quant = (name) => {
-      const t = W[name];
-      const { packed, scale } = quantizeInt8RowMajor(t.data, t.shape[0], t.shape[1]);
-      this.q[name] = { w: this._u32(packed), scale: this._f32(scale), N: t.shape[0], K: t.shape[1] };
-    };
-    const f32buf = (name) => {
-      this.bufs[name] = this._f32(W[name].data);
-    };
-    quant("model.embed_tokens.weight");
-    f32buf("model.norm.weight");
-    const proj = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"];
-    for (let i = 0; i < c.numLayers; i++) {
-      const p = `model.layers.${i}`;
-      f32buf(`${p}.input_layernorm.weight`);
-      f32buf(`${p}.post_attention_layernorm.weight`);
-      for (const s of proj) quant4(`${p}.${s}.weight`);
-      for (const b of ["q", "k", "v"]) f32buf(`${p}.self_attn.${b}_proj.bias`);
-      if (i % 6 === 0) await new Promise((r) => setTimeout(r, 0));
-    }
+    const uploader = new ModelUploader({
+      schema: this.schema,
+      q: this.q,
+      q4: this.q4,
+      bufs: this.bufs,
+      uploadF32: (arr) => this._f32(arr),
+      uploadU32: (arr) => this._u32(arr)
+    });
+    await streamSafetensors(source, {
+      names: this.schema.expectedNames,
+      onProgress,
+      onTensor: async (tensor) => {
+        uploader.visit(tensor);
+        if (uploader.seen.size % 48 === 0) await new Promise((r) => setTimeout(r, 0));
+      }
+    });
+    uploader.finalize();
     this._buildRope(this.maxCtx);
     this.kc = [], this.vc = [];
     const kvSize = c.numKVHeads * this.maxCtx * c.headDim * 4;
@@ -35317,35 +35519,6 @@ var QwenWGPU = class {
     onProgress("ready", 1);
     this._uniCache = {};
     return this;
-  }
-  async _loadRaw(source, onProgress) {
-    const reader = typeof source === "string" ? urlReader(source) : source;
-    const out = {};
-    const idx = JSON.parse(await reader.text("model.safetensors.index.json"));
-    const shards = [...new Set(Object.values(idx.weight_map))];
-    const dec = (u8, n) => {
-      const u16 = new Uint16Array(u8.buffer, u8.byteOffset, n);
-      const o = new Float32Array(n);
-      const o32 = new Uint32Array(o.buffer);
-      for (let i = 0; i < n; i++) o32[i] = u16[i] << 16;
-      return o;
-    };
-    for (const shard of shards) {
-      const lenBuf = await reader.range(shard, 0, 8);
-      const hl = Number(new DataView(lenBuf).getBigUint64(0, true));
-      const hdr = JSON.parse(new TextDecoder().decode(new Uint8Array(await reader.range(shard, 8, 8 + hl))));
-      const dataStart = 8 + hl;
-      for (const name of Object.keys(hdr)) {
-        if (name === "__metadata__") continue;
-        const t = hdr[name];
-        const numel = t.shape.reduce((a, b) => a * b, 1);
-        const [s, e] = t.data_offsets;
-        const buf = await reader.range(shard, dataStart + s, dataStart + e);
-        out[name] = { data: dec(new Uint8Array(buf), numel), shape: t.shape };
-        onProgress(name, 0.3);
-      }
-    }
-    return out;
   }
   _buildRope(maxSeq) {
     const { headDim, ropeTheta } = this.cfg;
@@ -35412,8 +35585,8 @@ var QwenWGPU = class {
     return sums;
   }
   // y = int8-GEMV(x, q) [+bias] [+lora]. q={w,scale,N,K}. moduleKey for LoRA lookup.
-  gemv(enc, xBuf, q, yBuf, biasBuf, moduleKey2) {
-    const mod = this.lora?.modules?.[moduleKey2];
+  gemv(enc, xBuf, q, yBuf, biasBuf, moduleKey) {
+    const mod = this.lora?.modules?.[moduleKey];
     if (mod) {
       const bgA = this._bg(this.pipes.loraA, [xBuf, mod.A, this.s.loraD, this._uni(new Uint32Array([q.K, mod.rank]))]);
       this._dispatch(enc, this.pipes.loraA, bgA, mod.rank, 1, "loraA");
@@ -35431,8 +35604,8 @@ var QwenWGPU = class {
     const bg = this._bg(this.pipes.gemv, [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf, this._uni(new Uint8Array(meta))]);
     this._dispatch(enc, this.pipes.gemv, bg, gx, gy, `gemv:${q.N}x${q.K}`);
   }
-  gemv4(enc, xBuf, q, yBuf, biasBuf, moduleKey2) {
-    const mod = this.lora?.modules?.[moduleKey2];
+  gemv4(enc, xBuf, q, yBuf, biasBuf, moduleKey) {
+    const mod = this.lora?.modules?.[moduleKey];
     if (mod) {
       this._dispatch(enc, this.pipes.loraA, this._bg(this.pipes.loraA, [xBuf, mod.A, this.s.loraD, this._uni(new Uint32Array([q.K, mod.rank]))]), mod.rank, 1, "loraA");
     }
@@ -35683,11 +35856,6 @@ function readTensor(st2, name) {
   const arr = dt === "BF16" ? bf16f32(st2.u8, st2.dataStart + t.data_offsets[0], n) : f32(st2.u8, st2.dataStart + t.data_offsets[0], n);
   return { arr, shape: t.shape };
 }
-function moduleKey(name) {
-  const m = name.match(/layers\.(\d+)\.(self_attn|mlp)\.([a-z_]+?)(_proj)?\.(lora_[ABab])/i);
-  if (!m) return null;
-  return `layers.${m[1]}.${m[2]}.${m[3].replace(/_proj$/, "")}_proj`;
-}
 var isA = (name) => /lora_a/i.test(name);
 function transpose2d(arr, rows, cols) {
   const o = new Float32Array(arr.length);
@@ -35711,7 +35879,7 @@ async function loadLoraAdapterGPU(dev2, files, cfg) {
   const names = Object.keys(st2.header).filter((k2) => k2 !== "__metadata__" && /lora_[abAB]/.test(k2));
   const groups = {};
   for (const nm of names) {
-    const key = moduleKey(nm);
+    const key = moduleKeyFromTensorName(nm);
     if (!key) continue;
     (groups[key] ||= {})[isA(nm) ? "A" : "B"] = readTensor(st2, nm);
   }

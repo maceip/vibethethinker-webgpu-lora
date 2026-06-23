@@ -5,8 +5,9 @@
 // Correctness is validated against the tf.js forward (which == HuggingFace).
 import { GEMV, GEMV4, LORA_A, RMSNORM, ROPE, ATTN_PARTIAL, ATTN_COMBINE, ADD, SILUMUL, EMBED, EMBED_BUF, ARGMAX,
   GEMM4, RMSNORM_T, ROPE_T, EMBED_T, ATTN_PREFILL } from './kernels.js';
-import { quantizeInt8RowMajor, quantizeInt4Group } from './quantize.js';
-import { urlReader } from '../readers.js';
+import { createQwenSchema } from './model_schema.js';
+import { streamSafetensors } from './safetensors_loader.js';
+import { ModelUploader } from './model_uploader.js';
 
 const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
 const UNIFORM = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -42,23 +43,27 @@ export class QwenWGPU {
     this.maxPrefillT = Math.min(this.opts.maxPrefillT || 8192, this.maxCtx); // batched-prefill cap (<= ctx)
     this.pipes = { gemv: this._pipe(GEMV), loraA: this._pipe(LORA_A), rms: this._pipe(RMSNORM), rope: this._pipe(ROPE), attnP: this._pipe(ATTN_PARTIAL), attnC: this._pipe(ATTN_COMBINE), add: this._pipe(ADD), silu: this._pipe(SILUMUL), embed: this._pipe(EMBED), embedBuf: this._pipe(EMBED_BUF), argmax: this._pipe(ARGMAX), gemv4: this._pipe(GEMV4),
       gemm4: this._pipe(GEMM4), rmsT: this._pipe(RMSNORM_T), ropeT: this._pipe(ROPE_T), embedT: this._pipe(EMBED_T), attnPrefill: this._pipe(ATTN_PREFILL) };
-    onProgress('loading f32 weights', 0);
-    const W = await this._loadRaw(source, onProgress);
-    onProgress('quantizing to int8 + uploading', 0.5);
+    onProgress('streaming + quantizing weights', 0);
+    this.schema = createQwenSchema(c);
+    this.layers = this.schema.layers;
     this.q = {}; this.q4 = {};
-    const quant4 = (name) => { const t = W[name]; const { packed, scale, groupsPerRow } = quantizeInt4Group(t.data, t.shape[0], t.shape[1], 128); this.q4[name] = { w: this._u32(packed), scale: this._f32(scale), N: t.shape[0], K: t.shape[1], gpr: groupsPerRow }; };
-    const quant = (name) => { const t = W[name]; const { packed, scale } = quantizeInt8RowMajor(t.data, t.shape[0], t.shape[1]); this.q[name] = { w: this._u32(packed), scale: this._f32(scale), N: t.shape[0], K: t.shape[1] }; };
-    const f32buf = (name) => { this.bufs[name] = this._f32(W[name].data); };
-    quant('model.embed_tokens.weight'); // [vocab,hidden] -> int8 (embed lookup + lm_head)
-    f32buf('model.norm.weight');
-    const proj = ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj'];
-    for (let i = 0; i < c.numLayers; i++) {
-      const p = `model.layers.${i}`;
-      f32buf(`${p}.input_layernorm.weight`); f32buf(`${p}.post_attention_layernorm.weight`);
-      for (const s of proj) quant4(`${p}.${s}.weight`);
-      for (const b of ['q', 'k', 'v']) f32buf(`${p}.self_attn.${b}_proj.bias`);
-      if (i % 6 === 0) await new Promise(r => setTimeout(r, 0));
-    }
+    const uploader = new ModelUploader({
+      schema: this.schema,
+      q: this.q,
+      q4: this.q4,
+      bufs: this.bufs,
+      uploadF32: (arr) => this._f32(arr),
+      uploadU32: (arr) => this._u32(arr),
+    });
+    await streamSafetensors(source, {
+      names: this.schema.expectedNames,
+      onProgress,
+      onTensor: async (tensor) => {
+        uploader.visit(tensor);
+        if (uploader.seen.size % 48 === 0) await new Promise(r => setTimeout(r, 0));
+      },
+    });
+    uploader.finalize();
     // Context window (this.maxCtx) set above from opts; RoPE tables + KV cache sized to it.
     this._buildRope(this.maxCtx);
     // KV cache (f32) per layer
@@ -81,27 +86,6 @@ export class QwenWGPU {
     onProgress('ready', 1);
     this._uniCache = {};
     return this;
-  }
-
-  async _loadRaw(source, onProgress) {
-    // Parse safetensors to plain Float32Array (no tf). `source` may be a URL or a reader.
-    const reader = (typeof source === 'string') ? urlReader(source) : source;
-    const out = {};
-    const idx = JSON.parse(await reader.text('model.safetensors.index.json'));
-    const shards = [...new Set(Object.values(idx.weight_map))];
-    const dec = (u8, n) => { const u16 = new Uint16Array(u8.buffer, u8.byteOffset, n); const o = new Float32Array(n); const o32 = new Uint32Array(o.buffer); for (let i = 0; i < n; i++) o32[i] = u16[i] << 16; return o; };
-    for (const shard of shards) {
-      const lenBuf = await reader.range(shard, 0, 8); const hl = Number(new DataView(lenBuf).getBigUint64(0, true));
-      const hdr = JSON.parse(new TextDecoder().decode(new Uint8Array(await reader.range(shard, 8, 8 + hl)))); const dataStart = 8 + hl;
-      for (const name of Object.keys(hdr)) {
-        if (name === '__metadata__') continue;
-        const t = hdr[name]; const numel = t.shape.reduce((a, b) => a * b, 1); const [s, e] = t.data_offsets;
-        const buf = await reader.range(shard, dataStart + s, dataStart + e);
-        out[name] = { data: dec(new Uint8Array(buf), numel), shape: t.shape };
-        onProgress(name, 0.3);
-      }
-    }
-    return out;
   }
 
   _buildRope(maxSeq) {
