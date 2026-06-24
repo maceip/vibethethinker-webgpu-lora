@@ -15,9 +15,12 @@ function decodeF16ToF32(u8, numel) {
   const u16 = new Uint16Array(u8.buffer, u8.byteOffset, numel);
   const out = new Float32Array(numel);
   for (let i = 0; i < numel; i++) {
-    const h = u16[i], s = (h & 0x8000) >> 15, e = (h & 0x7c00) >> 10, f = h & 0x03ff;
+    const h = u16[i],
+      s = (h & 0x8000) >> 15,
+      e = (h & 0x7c00) >> 10,
+      f = h & 0x03ff;
     if (e === 0) out[i] = (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
-    else if (e === 0x1f) out[i] = f ? NaN : (s ? -Infinity : Infinity);
+    else if (e === 0x1f) out[i] = f ? NaN : s ? -Infinity : Infinity;
     else out[i] = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
   }
   return out;
@@ -45,7 +48,7 @@ async function loadIndex(reader) {
 }
 
 function shardPlan(shards, weightMap, names) {
-  if (!weightMap || !names) return new Map(shards.map(shard => [shard, null]));
+  if (!weightMap || !names) return new Map(shards.map((shard) => [shard, null]));
   const plan = new Map();
   for (const name of names) {
     const shard = weightMap[name];
@@ -64,7 +67,7 @@ function shardPlan(shards, weightMap, names) {
  */
 export async function streamSafetensors(source, { names = null, onTensor, onProgress = () => {} } = {}) {
   if (!onTensor) throw new Error('streamSafetensors requires onTensor');
-  const reader = (typeof source === 'string') ? urlReader(source) : source;
+  const reader = typeof source === 'string' ? urlReader(source) : source;
   const { weightMap, shards } = await loadIndex(reader);
   const plan = shardPlan(shards, weightMap, names);
   let visited = 0;
@@ -76,8 +79,12 @@ export async function streamSafetensors(source, { names = null, onTensor, onProg
     const hdrBuf = await reader.range(shard, 8, 8 + headerLen);
     const header = JSON.parse(new TextDecoder().decode(new Uint8Array(hdrBuf)));
     const dataStart = 8 + headerLen;
-    const allNames = Object.keys(header).filter(k => k !== '__metadata__');
-    const tensorNames = wantedInShard ? allNames.filter(n => wantedInShard.has(n)) : (names ? allNames.filter(n => names.has(n)) : allNames);
+    const allNames = Object.keys(header).filter((k) => k !== '__metadata__');
+    const tensorNames = wantedInShard
+      ? allNames.filter((n) => wantedInShard.has(n))
+      : names
+        ? allNames.filter((n) => names.has(n))
+        : allNames;
 
     for (const name of tensorNames) {
       const t = header[name];

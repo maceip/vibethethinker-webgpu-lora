@@ -59,7 +59,7 @@ async function runTop1TieCase(dev, logits) {
 
 window.run = async () => {
   const dev = await requestDevice();
-  dev.addEventListener?.('uncapturederror', e => console.log('VWG GPUERR ' + e.error.message.slice(0, 160)));
+  dev.addEventListener?.('uncapturederror', (e) => console.log('VWG GPUERR ' + e.error.message.slice(0, 160)));
 
   const logits = new Float32Array(300).fill(-5);
   logits[1] = 7;
@@ -73,4 +73,6 @@ window.run = async () => {
   console.log('VWG DONE');
 };
 
-window.addEventListener('DOMContentLoaded', () => window.run().catch(e => console.log('VWG ERROR ' + e.message + ' | ' + (e.stack || '').slice(0, 300))));
+window.addEventListener('DOMContentLoaded', () =>
+  window.run().catch((e) => console.log('VWG ERROR ' + e.message + ' | ' + (e.stack || '').slice(0, 300))),
+);

@@ -35,7 +35,12 @@ export class GPUBufferPool {
   }
 
   stats() {
-    return { ...this._stats, uniformPoolSize: this.uniformPool.length, staticUniforms: this.staticUniforms.size, bindGroups: this.bindGroups.size };
+    return {
+      ...this._stats,
+      uniformPoolSize: this.uniformPool.length,
+      staticUniforms: this.staticUniforms.size,
+      bindGroups: this.bindGroups.size,
+    };
   }
 
   buffer(size, usage) {
@@ -57,7 +62,10 @@ export class GPUBufferPool {
 
   dynamicUniform(arr, usage) {
     let b = this.uniformPool[this.uniformIdx];
-    if (!b) { b = this.buffer(32, usage); this.uniformPool[this.uniformIdx] = b; }
+    if (!b) {
+      b = this.buffer(32, usage);
+      this.uniformPool[this.uniformIdx] = b;
+    }
     this.uniformIdx++;
     this._stats.dynamicUniformWrites++;
     this.dev.queue.writeBuffer(b, 0, arr.buffer, arr.byteOffset, arr.byteLength);
@@ -81,13 +89,19 @@ export class GPUBufferPool {
 
   idForBuffer(buffer) {
     let id = this.bufferIds.get(buffer);
-    if (!id) { id = this.nextBufferId++; this.bufferIds.set(buffer, id); }
+    if (!id) {
+      id = this.nextBufferId++;
+      this.bufferIds.set(buffer, id);
+    }
     return id;
   }
 
   idForPipeline(pipe) {
     let id = this.pipelineIds.get(pipe);
-    if (!id) { id = this.nextPipelineId++; this.pipelineIds.set(pipe, id); }
+    if (!id) {
+      id = this.nextPipelineId++;
+      this.pipelineIds.set(pipe, id);
+    }
     return id;
   }
 
@@ -101,7 +115,7 @@ export class GPUBufferPool {
 
   cachedBindGroup(pipe, buffers, key, { sensitive = false } = {}) {
     if (!this.cacheBindGroups || !key) return this.uncachedBindGroup(pipe, buffers);
-    const fullKey = `${this.idForPipeline(pipe)}:${key}:${buffers.map(b => this.idForBuffer(b)).join(',')}`;
+    const fullKey = `${this.idForPipeline(pipe)}:${key}:${buffers.map((b) => this.idForBuffer(b)).join(',')}`;
     let bg = this.bindGroups.get(fullKey);
     if (!bg) {
       this._stats.bindGroupMisses++;

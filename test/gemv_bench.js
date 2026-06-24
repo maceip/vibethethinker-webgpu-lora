@@ -1,7 +1,10 @@
 // Standalone GEMV microbench: time int4 GEMV for one shape (no model load).
 // Iterate kernel designs fast. Reports us/dispatch via timestamp-query.
-const N = 11008, K = 2048, G = 128;        // gate_proj shape
-const K8 = K / 8, GPR = K / G;
+const N = 11008,
+  K = 2048,
+  G = 128; // gate_proj shape
+const K8 = K / 8,
+  GPR = K / G;
 
 // --- kernel variants (parametrized) ---
 // V0: baseline — wg=256, 1 row/wg, subgroup reduce (current runtime kernel)
@@ -99,7 +102,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 window.run = async () => {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   const dev = await adapter.requestDevice({ requiredFeatures: ['subgroups', 'timestamp-query'] });
-  dev.addEventListener?.('uncapturederror', e => console.log('VWG GPUERR ' + e.error.message.slice(0, 200)));
+  dev.addEventListener?.('uncapturederror', (e) => console.log('VWG GPUERR ' + e.error.message.slice(0, 200)));
   const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
   const wbuf = dev.createBuffer({ size: N * K8 * 4, usage: S });
   const sbuf = dev.createBuffer({ size: N * GPR * 4, usage: S });
@@ -107,37 +110,77 @@ window.run = async () => {
   const ybuf = dev.createBuffer({ size: N * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const ubuf = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   // random-ish fill
-  const wd = new Uint32Array(N * K8); for (let i = 0; i < wd.length; i++) wd[i] = (i * 2654435761) >>> 0; dev.queue.writeBuffer(wbuf, 0, wd);
-  const sd = new Float32Array(N * GPR).fill(0.01); dev.queue.writeBuffer(sbuf, 0, sd);
-  const xd = new Float32Array(K); for (let i = 0; i < K; i++) xd[i] = Math.sin(i) * 0.1; dev.queue.writeBuffer(xbuf, 0, xd);
+  const wd = new Uint32Array(N * K8);
+  for (let i = 0; i < wd.length; i++) wd[i] = (i * 2654435761) >>> 0;
+  dev.queue.writeBuffer(wbuf, 0, wd);
+  const sd = new Float32Array(N * GPR).fill(0.01);
+  dev.queue.writeBuffer(sbuf, 0, sd);
+  const xd = new Float32Array(K);
+  for (let i = 0; i < K; i++) xd[i] = Math.sin(i) * 0.1;
+  dev.queue.writeBuffer(xbuf, 0, xd);
 
   const qs = dev.createQuerySet({ type: 'timestamp', count: 2 });
   const qres = dev.createBuffer({ size: 32, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
   const qread = dev.createBuffer({ size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
 
   const bench = async (label, code, dispatchFn) => {
-    let pipe; try { pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } }); }
-    catch (e) { console.log('VWG ' + label + ' COMPILE-ERR ' + e.message.slice(0, 120)); return; }
-    const meta = new Uint32Array([K, N, 65535, GPR]); dev.queue.writeBuffer(ubuf, 0, meta);
-    const bg = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: xbuf } }, { binding: 1, resource: { buffer: wbuf } },
-      { binding: 2, resource: { buffer: sbuf } }, { binding: 3, resource: { buffer: ybuf } },
-      { binding: 4, resource: { buffer: ubuf } }] });
+    let pipe;
+    try {
+      pipe = dev.createComputePipeline({
+        layout: 'auto',
+        compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' },
+      });
+    } catch (e) {
+      console.log('VWG ' + label + ' COMPILE-ERR ' + e.message.slice(0, 120));
+      return;
+    }
+    const meta = new Uint32Array([K, N, 65535, GPR]);
+    dev.queue.writeBuffer(ubuf, 0, meta);
+    const bg = dev.createBindGroup({
+      layout: pipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: xbuf } },
+        { binding: 1, resource: { buffer: wbuf } },
+        { binding: 2, resource: { buffer: sbuf } },
+        { binding: 3, resource: { buffer: ybuf } },
+        { binding: 4, resource: { buffer: ubuf } },
+      ],
+    });
     const REP = 200;
     // warmup
-    { const e = dev.createCommandEncoder(); for (let i = 0; i < 5; i++) dispatchFn(e, pipe, bg); dev.queue.submit([e.finish()]); await dev.queue.onSubmittedWorkDone(); }
+    {
+      const e = dev.createCommandEncoder();
+      for (let i = 0; i < 5; i++) dispatchFn(e, pipe, bg);
+      dev.queue.submit([e.finish()]);
+      await dev.queue.onSubmittedWorkDone();
+    }
     const enc = dev.createCommandEncoder();
-    const p = enc.beginComputePass({ timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } });
-    for (let i = 0; i < REP; i++) { p.setPipeline(pipe); dispatchFn(null, pipe, bg, p); }
-    p.end(); enc.resolveQuerySet(qs, 0, 2, qres, 0); enc.copyBufferToBuffer(qres, 0, qread, 0, 16);
-    dev.queue.submit([enc.finish()]); await qread.mapAsync(GPUMapMode.READ);
-    const t = new BigInt64Array(qread.getMappedRange()); const us = Number(t[1] - t[0]) / 1000 / REP; qread.unmap();
-    const gbW = (N * K8 * 4) / (us / 1e6) / 1e9;  // weight bytes/s
+    const p = enc.beginComputePass({
+      timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 },
+    });
+    for (let i = 0; i < REP; i++) {
+      p.setPipeline(pipe);
+      dispatchFn(null, pipe, bg, p);
+    }
+    p.end();
+    enc.resolveQuerySet(qs, 0, 2, qres, 0);
+    enc.copyBufferToBuffer(qres, 0, qread, 0, 16);
+    dev.queue.submit([enc.finish()]);
+    await qread.mapAsync(GPUMapMode.READ);
+    const t = new BigInt64Array(qread.getMappedRange());
+    const us = Number(t[1] - t[0]) / 1000 / REP;
+    qread.unmap();
+    const gbW = (N * K8 * 4) / (us / 1e6) / 1e9; // weight bytes/s
     console.log('VWG ' + us.toFixed(1).padStart(7) + ' us  ' + gbW.toFixed(0).padStart(4) + ' GB/s  ' + label);
   };
   const wgDispatch = (rowsPerWg) => (e, pipe, bg, pass) => {
-    const groups = Math.ceil(N / rowsPerWg); const gx = Math.min(groups, 65535), gy = Math.ceil(groups / gx);
-    if (pass) { pass.setBindGroup(0, bg); pass.dispatchWorkgroups(gx, gy); }
+    const groups = Math.ceil(N / rowsPerWg);
+    const gx = Math.min(groups, 65535),
+      gy = Math.ceil(groups / gx);
+    if (pass) {
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(gx, gy);
+    }
   };
   // sgPerWg assumed 8 (Apple sgsz=32, WG=256) for V2 row count
   await bench('V0 wg=256 1row', V0(256), wgDispatch(1));
@@ -145,8 +188,10 @@ window.run = async () => {
   await bench('V1 wg=256 ROWS=4', V1(256, 4), wgDispatch(4));
   await bench('V1 wg=256 ROWS=8', V1(256, 8), wgDispatch(8));
   await bench('V1 wg=128 ROWS=8', V1(128, 8), wgDispatch(8));
-  await bench('V2 wg=256 sg/row', V2(256), wgDispatch(8));   // 8 subgroups/wg → 8 rows
-  await bench('V2 wg=128 sg/row', V2(128), wgDispatch(4));   // 4 subgroups/wg → 4 rows
+  await bench('V2 wg=256 sg/row', V2(256), wgDispatch(8)); // 8 subgroups/wg → 8 rows
+  await bench('V2 wg=128 sg/row', V2(128), wgDispatch(4)); // 4 subgroups/wg → 4 rows
   console.log('VWG DONE');
 };
-window.addEventListener('DOMContentLoaded', () => window.run().catch(e => console.log('VWG ERROR ' + e.message + ' | ' + (e.stack || '').slice(0, 200))));
+window.addEventListener('DOMContentLoaded', () =>
+  window.run().catch((e) => console.log('VWG ERROR ' + e.message + ' | ' + (e.stack || '').slice(0, 200))),
+);

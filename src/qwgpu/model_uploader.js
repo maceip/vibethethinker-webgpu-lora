@@ -25,7 +25,14 @@ export class ModelUploader {
       this.q[name] = { w: this.uploadU32(packed), scale: this.uploadF32(scale), N: shape[0], K: shape[1] };
     } else if (desc.quant === 'int4') {
       const { packed, scale, groupsPerRow } = quantizeInt4Group(data, shape[0], shape[1], this.groupSize);
-      this.q4[name] = { w: this.uploadU32(packed), scale: this.uploadF32(scale), N: shape[0], K: shape[1], gpr: groupsPerRow, desc };
+      this.q4[name] = {
+        w: this.uploadU32(packed),
+        scale: this.uploadF32(scale),
+        N: shape[0],
+        K: shape[1],
+        gpr: groupsPerRow,
+        desc,
+      };
     } else if (desc.quant === 'f32') {
       this.bufs[name] = this.uploadF32(data);
     } else {

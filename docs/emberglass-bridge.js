@@ -7880,12 +7880,12 @@ async function createInferenceSession(buffer_or_path, session_options, session_c
     logSeverityLevel,
     ...session_options
   });
-  const session2 = await (apis.IS_WEB_ENV ? webInitChain = webInitChain.then(load) : load());
-  session2.config = session_config;
-  return session2;
+  const session = await (apis.IS_WEB_ENV ? webInitChain = webInitChain.then(load) : load());
+  session.config = session_config;
+  return session;
 }
-async function runInferenceSession(session2, ortFeed) {
-  const run = () => session2.run(ortFeed);
+async function runInferenceSession(session, ortFeed) {
+  const run = () => session.run(ortFeed);
   return apis.IS_WEB_ENV ? webInferenceChain = webInferenceChain.then(run) : run();
 }
 function isONNXTensor(x) {
@@ -9912,8 +9912,8 @@ async function constructSessions(pretrained_model_name_or_path, names, options, 
           cache_config,
           name
         );
-        const session2 = await createInferenceSession(buffer_or_path, session_options, session_config);
-        return [name, session2];
+        const session = await createInferenceSession(buffer_or_path, session_options, session_config);
+        return [name, session];
       })
     )
   );
@@ -9928,8 +9928,8 @@ function replaceTensors(obj) {
   }
   return obj;
 }
-async function sessionRun(session2, inputs) {
-  const checkedInputs = validateInputs(session2, inputs);
+async function sessionRun(session, inputs) {
+  const checkedInputs = validateInputs(session, inputs);
   try {
     const ortFeed = Object.fromEntries(
       Object.entries(checkedInputs).map(([k2, v]) => {
@@ -9945,7 +9945,7 @@ async function sessionRun(session2, inputs) {
         return [k2, tensor];
       })
     );
-    const output = await runInferenceSession(session2, ortFeed);
+    const output = await runInferenceSession(session, ortFeed);
     return replaceTensors(output);
   } catch (e) {
     const formatted = Object.fromEntries(
@@ -9966,10 +9966,10 @@ async function sessionRun(session2, inputs) {
     throw e;
   }
 }
-function validateInputs(session2, inputs) {
+function validateInputs(session, inputs) {
   const checkedInputs = /* @__PURE__ */ Object.create(null);
   const missingInputs = [];
-  for (const inputName of session2.inputNames) {
+  for (const inputName of session.inputNames) {
     const tensor = inputs[inputName];
     if (!(tensor instanceof Tensor22)) {
       missingInputs.push(inputName);
@@ -9983,9 +9983,9 @@ function validateInputs(session2, inputs) {
     );
   }
   const numInputsProvided = Object.keys(inputs).length;
-  const numInputsNeeded = session2.inputNames.length;
+  const numInputsNeeded = session.inputNames.length;
   if (numInputsProvided > numInputsNeeded) {
-    let ignored = Object.keys(inputs).filter((inputName) => !session2.inputNames.includes(inputName));
+    let ignored = Object.keys(inputs).filter((inputName) => !session.inputNames.includes(inputName));
     logger.warn(
       `WARNING: Too many inputs were provided (${numInputsProvided} > ${numInputsNeeded}). The following inputs will be ignored: "${ignored.join(", ")}".`
     );
@@ -10143,28 +10143,28 @@ async function seq2seq_forward(self2, model_inputs) {
   return await decoder_forward(self2, other_decoder_inputs, true);
 }
 async function encoder_forward(self2, model_inputs) {
-  const session2 = self2.sessions["model"];
-  const encoderFeeds = pick(model_inputs, session2.inputNames);
-  if (session2.inputNames.includes("inputs_embeds") && !encoderFeeds.inputs_embeds) {
+  const session = self2.sessions["model"];
+  const encoderFeeds = pick(model_inputs, session.inputNames);
+  if (session.inputNames.includes("inputs_embeds") && !encoderFeeds.inputs_embeds) {
     if (!model_inputs.input_ids) {
       throw new Error("Both `input_ids` and `inputs_embeds` are missing in the model inputs.");
     }
     encoderFeeds.inputs_embeds = await self2.encode_text({ input_ids: model_inputs.input_ids });
   }
-  if (session2.inputNames.includes("token_type_ids") && !encoderFeeds.token_type_ids) {
+  if (session.inputNames.includes("token_type_ids") && !encoderFeeds.token_type_ids) {
     if (!encoderFeeds.input_ids) {
       throw new Error("Both `input_ids` and `token_type_ids` are missing in the model inputs.");
     }
     encoderFeeds.token_type_ids = zeros_like(encoderFeeds.input_ids);
   }
-  if (session2.inputNames.includes("pixel_mask") && !encoderFeeds.pixel_mask) {
+  if (session.inputNames.includes("pixel_mask") && !encoderFeeds.pixel_mask) {
     if (!encoderFeeds.pixel_values) {
       throw new Error("Both `pixel_values` and `pixel_mask` are missing in the model inputs.");
     }
     const dims = encoderFeeds.pixel_values.dims;
     encoderFeeds.pixel_mask = ones([dims[0], dims[2], dims[3]]);
   }
-  return await sessionRun(session2, encoderFeeds);
+  return await sessionRun(session, encoderFeeds);
 }
 async function auto_encoder_forward(self2, model_inputs) {
   const encoded = await self2.encode(model_inputs);
@@ -10215,7 +10215,7 @@ function addPastKeyValues(self2, decoderFeeds, pastKeyValues) {
     Object.assign(decoderFeeds, pastKeyValues);
     return pastKeyValues;
   }
-  const session2 = self2.sessions["decoder_model_merged"] ?? self2.sessions["model"];
+  const session = self2.sessions["decoder_model_merged"] ?? self2.sessions["model"];
   const batch_size = (decoderFeeds[self2.main_input_name] ?? decoderFeeds.attention_mask)?.dims?.[0] ?? 1;
   const names = getCacheNames(self2.config);
   const num_heads = self2.config?.normalized_config?.num_heads;
@@ -10224,7 +10224,7 @@ function addPastKeyValues(self2, decoderFeeds, pastKeyValues) {
     symbols["batch_size x num_heads"] = batch_size * num_heads;
   }
   const entries = /* @__PURE__ */ Object.create(null);
-  for (const meta of session2.inputMetadata) {
+  for (const meta of session.inputMetadata) {
     if (!names.has(meta.name)) continue;
     const shape = resolveCacheShape(meta.shape, symbols);
     const size = shape.reduce((a, b) => a * b, 1);
@@ -10240,23 +10240,23 @@ function addPastKeyValues(self2, decoderFeeds, pastKeyValues) {
   return new DynamicCache(entries);
 }
 async function decoder_forward(self2, model_inputs, is_encoder_decoder = false) {
-  const session2 = self2.sessions[is_encoder_decoder ? "decoder_model_merged" : "model"];
+  const session = self2.sessions[is_encoder_decoder ? "decoder_model_merged" : "model"];
   const { past_key_values, ...new_model_inputs } = model_inputs;
-  if (session2.inputNames.includes("use_cache_branch")) {
+  if (session.inputNames.includes("use_cache_branch")) {
     new_model_inputs.use_cache_branch = boolTensor(
       past_key_values != null && Object.keys(past_key_values).length > 0
     );
   }
-  if (session2.inputNames.includes("position_ids") && new_model_inputs.attention_mask && !new_model_inputs.position_ids) {
+  if (session.inputNames.includes("position_ids") && new_model_inputs.attention_mask && !new_model_inputs.position_ids) {
     const start_index = ["paligemma", "gemma3_text", "gemma3"].includes(self2.config.model_type) ? 1 : 0;
     new_model_inputs.position_ids = create_position_ids(new_model_inputs, past_key_values, start_index);
   }
-  if (session2.inputNames.includes("num_logits_to_keep") && !new_model_inputs.num_logits_to_keep) {
+  if (session.inputNames.includes("num_logits_to_keep") && !new_model_inputs.num_logits_to_keep) {
     new_model_inputs.num_logits_to_keep = new Tensor22("int64", [0n], []);
   }
   addPastKeyValues(self2, new_model_inputs, past_key_values);
-  const fixed = pick(new_model_inputs, session2.inputNames);
-  return await sessionRun(session2, fixed);
+  const fixed = pick(new_model_inputs, session.inputNames);
+  return await sessionRun(session, fixed);
 }
 async function generic_text_to_text_forward(self2, {
   // Generic parameters:
@@ -10394,8 +10394,8 @@ function create_position_ids(model_inputs, past_key_values = null, start_index =
 }
 function decoder_prepare_inputs_for_generation(self2, input_ids, model_inputs, generation_config) {
   const past_length = model_inputs.past_key_values ? model_inputs.past_key_values.get_seq_length() : 0;
-  const session2 = self2.sessions["decoder_model_merged"] ?? self2.sessions["model"];
-  if (session2?.inputNames.includes("num_logits_to_keep") && !model_inputs.num_logits_to_keep) {
+  const session = self2.sessions["decoder_model_merged"] ?? self2.sessions["model"];
+  if (session?.inputNames.includes("num_logits_to_keep") && !model_inputs.num_logits_to_keep) {
     model_inputs.num_logits_to_keep = new Tensor22("int64", [1n], []);
   }
   if (!model_inputs.attention_mask) {
@@ -16489,7 +16489,7 @@ var init_transformers_web = __esm({
       };
     }
     wrap = async (session_bytes, session_options, names) => {
-      const session2 = await createInferenceSession(new Uint8Array(session_bytes), session_options);
+      const session = await createInferenceSession(new Uint8Array(session_bytes), session_options);
       return (
         /** @type {any} */
         (async (inputs) => {
@@ -16497,7 +16497,7 @@ var init_transformers_web = __esm({
           const ortFeed = Object.fromEntries(
             Object.entries(inputs).map(([k2, v]) => [k2, (proxied ? v.clone() : v).ort_tensor])
           );
-          const outputs = await runInferenceSession(session2, ortFeed);
+          const outputs = await runInferenceSession(session, ortFeed);
           if (Array.isArray(names)) {
             return names.map((n) => new Tensor22(outputs[n]));
           } else {
@@ -26441,8 +26441,8 @@ ${this.boa_token}${this.audio_token.repeat(this._compute_audio_num_tokens(audio_
        */
       async dispose() {
         const promises = [];
-        for (const session2 of Object.values(this.sessions)) {
-          promises.push(session2.release?.());
+        for (const session of Object.values(this.sessions)) {
+          promises.push(session.release?.());
         }
         return await Promise.all(promises);
       }
@@ -26997,8 +26997,8 @@ ${this.boa_token}${this.audio_token.repeat(this._compute_audio_num_tokens(audio_
         if (!Object.hasOwn(this.sessions, sessionName)) {
           throw new Error(`Model does not have a ${sessionName} session.`);
         }
-        const session2 = this.sessions[sessionName];
-        const output = await sessionRun(session2, pick(inputs, session2.inputNames));
+        const session = this.sessions[sessionName];
+        const output = await sessionRun(session, pick(inputs, session.inputNames));
         return output[outputName];
       }
       async encode_image(inputs) {
@@ -29255,8 +29255,8 @@ ${this.boa_token}${this.audio_token.repeat(this._compute_audio_num_tokens(audio_
         if (!model_inputs.attention_mask || model_inputs.position_ids) {
           return model_inputs;
         }
-        const session2 = this.sessions["decoder_model_merged"] ?? this.sessions["model"];
-        if (!session2.inputNames.includes("position_ids")) {
+        const session = this.sessions["decoder_model_merged"] ?? this.sessions["model"];
+        if (!session.inputNames.includes("position_ids")) {
           return model_inputs;
         }
         if (!model_inputs.past_key_values) {
@@ -30051,18 +30051,18 @@ ${this.boa_token}${this.audio_token.repeat(this._compute_audio_num_tokens(audio_
         const mode = this._generation_mode ?? "text";
         let output_1;
         if (mode === "text" || !model_inputs.past_key_values) {
-          const session2 = this.sessions["prepare_inputs_embeds"];
-          const prep_inputs = pick(model_inputs, session2.inputNames);
-          output_1 = await sessionRun(session2, prep_inputs);
+          const session = this.sessions["prepare_inputs_embeds"];
+          const prep_inputs = pick(model_inputs, session.inputNames);
+          output_1 = await sessionRun(session, prep_inputs);
         } else {
-          const session2 = this.sessions["gen_img_embeds"];
+          const session = this.sessions["gen_img_embeds"];
           const prep_inputs = pick(
             {
               image_ids: model_inputs.input_ids
             },
-            session2.inputNames
+            session.inputNames
           );
-          output_1 = await sessionRun(session2, prep_inputs);
+          output_1 = await sessionRun(session, prep_inputs);
         }
         const input_2 = { ...model_inputs, ...output_1 };
         const output_2 = await decoder_forward(this, input_2);
@@ -31338,9 +31338,9 @@ ${this.boa_token}${this.audio_token.repeat(this._compute_audio_num_tokens(audio_
         }
         const decoder_feeds = { inputs_embeds, ...kwargs };
         addPastKeyValues(this, decoder_feeds, past_key_values);
-        const session2 = this.sessions["decoder_model_merged"];
-        const fixed = pick(decoder_feeds, session2.inputNames);
-        return await sessionRun(session2, fixed);
+        const session = this.sessions["decoder_model_merged"];
+        const fixed = pick(decoder_feeds, session.inputNames);
+        return await sessionRun(session, fixed);
       }
       async generate({ input_features, stopping_criteria: userStoppingCriteria, ...kwargs }) {
         if (!input_features) {
@@ -34726,6 +34726,26 @@ var QWEN25_3B = {
   attentionBias: true
 };
 
+// src/readers.js
+function urlReader(baseUrl, headers = {}) {
+  const base = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
+  return {
+    async range(path, start, end) {
+      const r = await fetch(base + path, { headers: { ...headers, Range: `bytes=${start}-${end - 1}` } });
+      if (!r.ok && r.status !== 206) throw new Error(`range ${path} ${start}-${end}: ${r.status}`);
+      return await r.arrayBuffer();
+    },
+    async text(path) {
+      const r = await fetch(base + path, { headers });
+      if (!r.ok) throw new Error(`fetch ${path}: ${r.status}`);
+      return await r.text();
+    }
+  };
+}
+function hfReader(repo, token = "", rev = "main") {
+  return urlReader(`https://huggingface.co/${repo}/resolve/${rev}`, token ? { Authorization: `Bearer ${token}` } : {});
+}
+
 // src/qwgpu/model_schema.js
 var arrEq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 function projDesc(layer, subpath, outDim, inDim, { bias = false } = {}) {
@@ -34894,95 +34914,11 @@ async function loadLoraAdapterGPU(dev, files, cfg) {
   return { name, modules };
 }
 
-// src/readers.js
-function urlReader(baseUrl, headers = {}) {
-  const base = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
-  return {
-    async range(path, start, end) {
-      const r = await fetch(base + path, { headers: { ...headers, Range: `bytes=${start}-${end - 1}` } });
-      if (!r.ok && r.status !== 206) throw new Error(`range ${path} ${start}-${end}: ${r.status}`);
-      return await r.arrayBuffer();
-    },
-    async text(path) {
-      const r = await fetch(base + path, { headers });
-      if (!r.ok) throw new Error(`fetch ${path}: ${r.status}`);
-      return await r.text();
-    }
-  };
-}
-function hfReader(repo, token = "", rev = "main") {
-  return urlReader(`https://huggingface.co/${repo}/resolve/${rev}`, token ? { Authorization: `Bearer ${token}` } : {});
-}
-function fileReader(fileMap) {
-  const pick2 = (path) => fileMap[path] || fileMap[path.split("/").pop()];
-  return {
-    async range(path, start, end) {
-      const f = pick2(path);
-      if (!f) throw new Error(`file not provided: ${path}`);
-      return await f.slice(start, end).arrayBuffer();
-    },
-    async text(path) {
-      const f = pick2(path);
-      if (!f) throw new Error(`file not provided: ${path}`);
-      return await f.text();
-    }
-  };
-}
-
-// src/services/adapter_registry.js
-var AdapterRegistry = class {
-  constructor() {
-    this.adapters = { none: null };
-  }
-  add(name, modules) {
-    this.adapters[name] = { modules };
-    return this.adapters[name];
-  }
-  get(name) {
-    return this.adapters[name] || null;
-  }
-  applyToRuntime(name, rt2) {
-    const adapter = this.get(name);
-    if (adapter) rt2.setLora(adapter);
-    else rt2.clearLora();
-    return adapter;
-  }
-};
-
-// src/services/generation_controller.js
-var GenerationController = class {
-  constructor({ session: session2, adapters: adapters2, systemPrompt, log: log2 = () => {
-  } }) {
-    this.session = session2;
-    this.adapters = adapters2;
-    this.systemPrompt = systemPrompt;
-    this.log = log2;
-  }
-  async runTriage({ adapterName, report, outputNode, maxTemperature = 0 }) {
-    const rt2 = this.session.rt;
-    if (!rt2) return;
-    outputNode.textContent = "";
-    const node = document.createTextNode("");
-    outputNode.appendChild(node);
-    this.adapters.applyToRuntime(adapterName, rt2);
-    this.log(`generating (adapter=${adapterName})\u2026`);
-    const messages = [{ role: "system", content: this.systemPrompt }, { role: "user", content: report }];
-    const t0 = performance.now();
-    let n = 0;
-    for await (const delta of this.session.generate(messages, { maxTokens: rt2.maxCtx, temperature: maxTemperature })) {
-      node.appendData(delta);
-      n++;
-    }
-    const dt = (performance.now() - t0) / 1e3;
-    this.log(`done: ${n} tokens in ${dt.toFixed(1)}s (${(n / dt).toFixed(1)} tok/s) adapter=${adapterName}`);
-  }
-};
-
 // src/qwgpu/kernels.js
 var GEMV = `
 enable subgroups;
 struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scaleLo:f32, gpr:u32 };
-@group(0) @binding(0) var<storage,read> x: array<f32>;
+@group(0) @binding(0) var<storage,read> x: array<vec4<f32>>;
 @group(0) @binding(1) var<storage,read> w: array<u32>;       // [N][K/4] int8
 @group(0) @binding(2) var<storage,read> scale: array<f32>;   // [N]
 @group(0) @binding(3) var<storage,read> bias: array<f32>;    // [N] or dummy
@@ -35001,8 +34937,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   for (var k = tid; k < K4; k = k + 64u) {
     let p = w[rb+k];
     let v = unpack4xI8(p);                 // vec4<i32>
-    let kk = k*4u;
-    acc = acc + x[kk]*f32(v.x) + x[kk+1u]*f32(v.y) + x[kk+2u]*f32(v.z) + x[kk+3u]*f32(v.w);
+    acc = acc + dot(x[k], vec4<f32>(v));
   }
   let ssum = subgroupAdd(acc);            // reduce within subgroup (no barrier)
   if (sgid == 0u) { part[tid / sgsz] = ssum; }
@@ -35018,17 +34953,17 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 }`;
 var LORA_A = `
 enable subgroups;
-@group(0) @binding(0) var<storage,read> x: array<f32>;     // [K]
-@group(0) @binding(1) var<storage,read> A: array<f32>;     // [rank][K] (transposed)
+@group(0) @binding(0) var<storage,read> x: array<vec4<f32>>;     // [K/4]
+@group(0) @binding(1) var<storage,read> A: array<vec4<f32>>;     // [rank][K/4] (transposed)
 @group(0) @binding(2) var<storage,read_write> d: array<f32>; // [rank]
 @group(0) @binding(3) var<uniform> m: vec2<u32>;           // K, rank
 var<workgroup> part: array<f32,64>;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
-  let r = wid.x; let K = m.x; if (r >= m.y) { return; }
-  let rb = r*K; var acc = 0.0;
-  for (var k = lid.x; k < K; k = k + 64u) { acc = acc + x[k]*A[rb + k]; }
+  let r = wid.x; let K4 = m.x / 4u; if (r >= m.y) { return; }
+  let rb = r*K4; var acc = 0.0;
+  for (var k = lid.x; k < K4; k = k + 64u) { acc = acc + dot(x[k], A[rb + k]); }
   let s = subgroupAdd(acc);
   if (sgid == 0u) { part[lid.x / sgsz] = s; }
   workgroupBarrier();
@@ -35036,97 +34971,99 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 }`;
 var LORA_A_BATCH = `
 enable subgroups;
-@group(0) @binding(0) var<storage,read> x: array<f32>;       // [T][K]
-@group(0) @binding(1) var<storage,read> A: array<f32>;       // [rank][K]
+@group(0) @binding(0) var<storage,read> x: array<vec4<f32>>;       // [T][K/4]
+@group(0) @binding(1) var<storage,read> A: array<vec4<f32>>;       // [rank][K/4]
 @group(0) @binding(2) var<storage,read_write> d: array<f32>; // [T][rank]
 @group(0) @binding(3) var<uniform> m: vec4<u32>;             // K, rank, T, _
 var<workgroup> part: array<f32,64>;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
-  let r = wid.x; let t = wid.y; let K = m.x; let rank = m.y; if (r >= rank || t >= m.z) { return; }
-  let xb = t*K; let ab = r*K; var acc = 0.0;
-  for (var k = lid.x; k < K; k = k + 64u) { acc = acc + x[xb + k]*A[ab + k]; }
+  let r = wid.x; let t = wid.y; let K4 = m.x / 4u; let rank = m.y; if (r >= rank || t >= m.z) { return; }
+  let xb = t*K4; let ab = r*K4; var acc = 0.0;
+  for (var k = lid.x; k < K4; k = k + 64u) { acc = acc + dot(x[xb + k], A[ab + k]); }
   let s = subgroupAdd(acc);
   if (sgid == 0u) { part[lid.x / sgsz] = s; }
   workgroupBarrier();
   if (lid.x == 0u) { let nsg=(64u+sgsz-1u)/sgsz; var o=0.0; for(var i=0u;i<nsg;i=i+1u){o=o+part[i];} d[t*rank + r]=o; }
 }`;
 var LORA_B_ADD_T = `
-struct Meta { T:u32, N:u32, rank:u32, gx:u32, scale:f32, p1:f32, p2:f32, p3:f32 };
+struct Meta { T:u32, N:u32, rank:u32, pad:u32, scale:f32, p1:f32, p2:f32, p3:f32 };
 @group(0) @binding(0) var<storage,read> d: array<f32>;        // [T][rank]
-@group(0) @binding(1) var<storage,read> B: array<f32>;        // [rank][N]
-@group(0) @binding(2) var<storage,read_write> Y: array<f32>;  // [T][N]
+@group(0) @binding(1) var<storage,read> B: array<vec4<f32>>;   // [rank][N/4]
+@group(0) @binding(2) var<storage,read_write> Y: array<vec4<f32>>;  // [T][N/4]
 @group(0) @binding(3) var<uniform> m: Meta;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.y * (m.gx * 256u) + gid.x;
-  if (i >= m.T * m.N) { return; }
-  let t = i / m.N; let n = i % m.N; var acc = 0.0;
-  for (var r = 0u; r < m.rank; r = r + 1u) { acc = acc + d[t*m.rank + r] * B[r*m.N + n]; }
-  Y[i] = Y[i] + m.scale * acc;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let N4 = m.N / 4u; let total = m.T * N4; let stride = nwg.x * 256u;
+  for (var i = gid.x; i < total; i = i + stride) {
+    let t = i / N4; let n = i % N4; var acc = vec4<f32>(0.0);
+    let db = t * m.rank;
+    for (var r = 0u; r < m.rank; r = r + 1u) { acc = acc + d[db + r] * B[r*N4 + n]; }
+    Y[i] = Y[i] + m.scale * acc;
+  }
 }`;
 var LORA_B_ADD = `
 struct Meta { N:u32, rank:u32, p0:u32, p1:u32, scale:f32, f0:f32, f1:f32, f2:f32 };
 @group(0) @binding(0) var<storage,read> d: array<f32>;       // [rank]
-@group(0) @binding(1) var<storage,read> B: array<f32>;       // [rank][N]
-@group(0) @binding(2) var<storage,read_write> y: array<f32>; // [N]
+@group(0) @binding(1) var<storage,read> B: array<vec4<f32>>; // [rank][N/4]
+@group(0) @binding(2) var<storage,read_write> y: array<vec4<f32>>; // [N/4]
 @group(0) @binding(3) var<uniform> m: Meta;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let n = gid.x;
-  if (n >= m.N) { return; }
-  var acc = 0.0;
-  for (var r = 0u; r < m.rank; r = r + 1u) { acc = acc + d[r] * B[r*m.N + n]; }
+  let n = gid.x; let N4 = m.N / 4u;
+  if (n >= N4) { return; }
+  var acc = vec4<f32>(0.0);
+  for (var r = 0u; r < m.rank; r = r + 1u) { acc = acc + d[r] * B[r*N4 + n]; }
   y[n] = y[n] + m.scale * acc;
 }`;
 var RMSNORM = `
-@group(0) @binding(0) var<storage,read> x: array<f32>;
-@group(0) @binding(1) var<storage,read> g: array<f32>;
-@group(0) @binding(2) var<storage,read_write> y: array<f32>;
+@group(0) @binding(0) var<storage,read> x: array<vec4<f32>>;
+@group(0) @binding(1) var<storage,read> g: array<vec4<f32>>;
+@group(0) @binding(2) var<storage,read_write> y: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> m: vec2<f32>;   // K, eps
 var<workgroup> part: array<f32,256>;
 @compute @workgroup_size(256)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
-  let tid = lid.x; let K = u32(m.x);
-  var s = 0.0; for (var k = tid; k < K; k = k + 256u) { let v = x[k]; s = s + v*v; }
+  let tid = lid.x; let K4 = u32(m.x) / 4u;
+  var s = 0.0; for (var k = tid; k < K4; k = k + 256u) { let v = x[k]; s = s + dot(v, v); }
   part[tid] = s; workgroupBarrier();
   for (var t = 128u; t > 0u; t = t/2u) { if (tid < t) { part[tid] = part[tid] + part[tid+t]; } workgroupBarrier(); }
   let inv = inverseSqrt(part[0]/m.x + m.y);
-  for (var k = tid; k < K; k = k + 256u) { y[k] = x[k]*inv*g[k]; }
+  for (var k = tid; k < K4; k = k + 256u) { y[k] = x[k]*inv*g[k]; }
 }`;
 var ROPE = `
-@group(0) @binding(0) var<storage,read_write> x: array<f32>;
-@group(0) @binding(1) var<storage,read> cosT: array<f32>;
-@group(0) @binding(2) var<storage,read> sinT: array<f32>;
+@group(0) @binding(0) var<storage,read_write> x: array<vec4<f32>>;
+@group(0) @binding(1) var<storage,read> cosT: array<vec4<f32>>;
+@group(0) @binding(2) var<storage,read> sinT: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> m: vec3<u32>;             // nHeads, headDim, pos
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let g = gid.x; let H = m.x; let D = m.y; let pos = m.z; let half = D/2u;
-  if (g >= H*half) { return; }
-  let h = g / half; let j = g % half;
-  let lo = h*D + j; let hi = lo + half; let off = pos*D + j;
+  let g = gid.x; let H = m.x; let D4 = m.y / 4u; let pos = m.z; let half4 = D4/2u;
+  if (g >= H*half4) { return; }
+  let h = g / half4; let j = g % half4;
+  let lo = h*D4 + j; let hi = lo + half4; let off = pos*D4 + j;
   let c = cosT[off]; let s = sinT[off];
   let xl = x[lo]; let xh = x[hi];
   x[lo] = xl*c - xh*s;
   x[hi] = xh*c + xl*s;
 }`;
 var ROPE_QK = `
-@group(0) @binding(0) var<storage,read_write> q: array<f32>;
-@group(0) @binding(1) var<storage,read_write> k: array<f32>;
-@group(0) @binding(2) var<storage,read> cosT: array<f32>;
-@group(0) @binding(3) var<storage,read> sinT: array<f32>;
+@group(0) @binding(0) var<storage,read_write> q: array<vec4<f32>>;
+@group(0) @binding(1) var<storage,read_write> k: array<vec4<f32>>;
+@group(0) @binding(2) var<storage,read> cosT: array<vec4<f32>>;
+@group(0) @binding(3) var<storage,read> sinT: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> m: vec4<u32>;             // qHeads, kvHeads, headDim, pos
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let g = gid.x; let qH = m.x; let kH = m.y; let D = m.z; let pos = m.w; let half = D/2u;
-  let qPairs = qH * half; let kPairs = kH * half; let total = qPairs + kPairs;
+  let g = gid.x; let qH = m.x; let kH = m.y; let D4 = m.z / 4u; let pos = m.w; let half4 = D4/2u;
+  let qPairs = qH * half4; let kPairs = kH * half4; let total = qPairs + kPairs;
   if (g >= total) { return; }
   let isK = g >= qPairs;
   var r = g;
   if (isK) { r = g - qPairs; }
-  let h = r / half; let j = r % half;
-  let lo = h*D + j; let hi = lo + half; let off = pos*D + j;
+  let h = r / half4; let j = r % half4;
+  let lo = h*D4 + j; let hi = lo + half4; let off = pos*D4 + j;
   let c = cosT[off]; let s = sinT[off];
   if (isK) {
     let xl = k[lo]; let xh = k[hi];
@@ -35195,14 +35132,14 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 }`;
 var GEMM4 = `
 struct Meta { K:u32, N:u32, T:u32, gpr:u32, hasBias:u32, p0:u32, p1:u32, p2:u32 };
-@group(0) @binding(0) var<storage,read> A: array<f32>;       // [T][K]
-@group(0) @binding(1) var<storage,read> W: array<u32>;       // [N][K/8] int4
-@group(0) @binding(2) var<storage,read> scale: array<f32>;   // [N][gpr]
-@group(0) @binding(3) var<storage,read> bias: array<f32>;    // [N] or dummy
-@group(0) @binding(4) var<storage,read_write> Y: array<f32>; // [T][N]
+@group(0) @binding(0) var<storage,read> A: array<vec4<f32>>;       // [T][K/4]
+@group(0) @binding(1) var<storage,read> W: array<u32>;             // [N][K/8] int4
+@group(0) @binding(2) var<storage,read> scale: array<f32>;         // [N][gpr]
+@group(0) @binding(3) var<storage,read> bias: array<f32>;          // [N] or dummy
+@group(0) @binding(4) var<storage,read_write> Y: array<f32>;       // [T][N]
 @group(0) @binding(5) var<uniform> m: Meta;
 const BM = 16u; const BN = 64u;
-var<workgroup> As: array<f32, 128>;   // BM*8 \u2014 A staged for one 8-wide K chunk
+var<workgroup> As: array<vec4<f32>, 32>;   // BM*8 \u2014 A staged for one 8-wide K chunk
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let tTile = wid.y * BM; let col = wid.x * BN + lid.x; let valid = col < m.N;
@@ -35210,9 +35147,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   var acc: array<f32, 16>;
   for (var i = 0u; i < BM; i = i + 1u) { acc[i] = 0.0; }
   for (var c = 0u; c < K8; c = c + 1u) {
-    for (var l = lid.x; l < BM*8u; l = l + 64u) {
-      let tt = l / 8u; let trow = tTile + tt;
-      As[l] = select(0.0, A[trow*m.K + c*8u + (l % 8u)], trow < m.T);
+    for (var l = lid.x; l < 32u; l = l + 64u) {
+      let tt = l / 2u; let trow = tTile + tt;
+      let offset = l % 2u;
+      As[l] = select(vec4<f32>(0.0), A[trow*(m.K/4u) + c*2u + offset], trow < m.T);
     }
     workgroupBarrier();
     if (valid) {
@@ -35221,9 +35159,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
       let w2=f32(i32(word<<20u)>>28u)*sc; let w3=f32(i32(word<<16u)>>28u)*sc;
       let w4=f32(i32(word<<12u)>>28u)*sc; let w5=f32(i32(word<<8u)>>28u)*sc;
       let w6=f32(i32(word<<4u)>>28u)*sc;  let w7=f32(i32(word)>>28u)*sc;
+      let vw0 = vec4<f32>(w0, w1, w2, w3);
+      let vw1 = vec4<f32>(w4, w5, w6, w7);
       for (var t = 0u; t < BM; t = t + 1u) {
-        let b = t*8u;
-        acc[t] = acc[t] + As[b]*w0+As[b+1u]*w1+As[b+2u]*w2+As[b+3u]*w3+As[b+4u]*w4+As[b+5u]*w5+As[b+6u]*w6+As[b+7u]*w7;
+        let b = t*2u;
+        acc[t] = acc[t] + dot(As[b], vw0) + dot(As[b+1u], vw1);
       }
     }
     workgroupBarrier();
@@ -35235,14 +35175,14 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 }`;
 var GEMM4_ADD_T = `
 struct Meta { K:u32, N:u32, T:u32, gpr:u32, hasBias:u32, p0:u32, p1:u32, p2:u32 };
-@group(0) @binding(0) var<storage,read> A: array<f32>;
+@group(0) @binding(0) var<storage,read> A: array<vec4<f32>>;       // [T][K/4]
 @group(0) @binding(1) var<storage,read> W: array<u32>;
 @group(0) @binding(2) var<storage,read> scale: array<f32>;
 @group(0) @binding(3) var<storage,read> bias: array<f32>;
 @group(0) @binding(4) var<storage,read_write> Y: array<f32>;
 @group(0) @binding(5) var<uniform> m: Meta;
 const BM = 16u; const BN = 64u;
-var<workgroup> As: array<f32, 128>;
+var<workgroup> As: array<vec4<f32>, 32>;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let tTile = wid.y * BM; let col = wid.x * BN + lid.x; let valid = col < m.N;
@@ -35250,9 +35190,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   var acc: array<f32, 16>;
   for (var i = 0u; i < BM; i = i + 1u) { acc[i] = 0.0; }
   for (var c = 0u; c < K8; c = c + 1u) {
-    for (var l = lid.x; l < BM*8u; l = l + 64u) {
-      let tt = l / 8u; let trow = tTile + tt;
-      As[l] = select(0.0, A[trow*m.K + c*8u + (l % 8u)], trow < m.T);
+    for (var l = lid.x; l < 32u; l = l + 64u) {
+      let tt = l / 2u; let trow = tTile + tt;
+      let offset = l % 2u;
+      As[l] = select(vec4<f32>(0.0), A[trow*(m.K/4u) + c*2u + offset], trow < m.T);
     }
     workgroupBarrier();
     if (valid) {
@@ -35261,9 +35202,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
       let w2=f32(i32(word<<20u)>>28u)*sc; let w3=f32(i32(word<<16u)>>28u)*sc;
       let w4=f32(i32(word<<12u)>>28u)*sc; let w5=f32(i32(word<<8u)>>28u)*sc;
       let w6=f32(i32(word<<4u)>>28u)*sc;  let w7=f32(i32(word)>>28u)*sc;
+      let vw0 = vec4<f32>(w0, w1, w2, w3);
+      let vw1 = vec4<f32>(w4, w5, w6, w7);
       for (var t = 0u; t < BM; t = t + 1u) {
-        let b = t*8u;
-        acc[t] = acc[t] + As[b]*w0+As[b+1u]*w1+As[b+2u]*w2+As[b+3u]*w3+As[b+4u]*w4+As[b+5u]*w5+As[b+6u]*w6+As[b+7u]*w7;
+        let b = t*2u;
+        acc[t] = acc[t] + dot(As[b], vw0) + dot(As[b+1u], vw1);
       }
     }
     workgroupBarrier();
@@ -35277,117 +35220,122 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   }
 }`;
 var ADD = `
-@group(0) @binding(0) var<storage,read> a: array<f32>;
-@group(0) @binding(1) var<storage,read_write> y: array<f32>;
-@group(0) @binding(2) var<uniform> n: u32;
+@group(0) @binding(0) var<storage,read> a: array<vec4<f32>>;
+@group(0) @binding(1) var<storage,read_write> y: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> n4: u32;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
   let stride = nwg.x * 256u;
-  for (var i = g.x; i < n; i = i + stride) { y[i] = y[i] + a[i]; }
+  for (var i = g.x; i < n4; i = i + stride) { y[i] = y[i] + a[i]; }
 }`;
 var SILUMUL = `
-@group(0) @binding(0) var<storage,read_write> gate: array<f32>;
-@group(0) @binding(1) var<storage,read> up: array<f32>;
-@group(0) @binding(2) var<uniform> n: u32;
+@group(0) @binding(0) var<storage,read_write> gate: array<vec4<f32>>;
+@group(0) @binding(1) var<storage,read> up: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> n4: u32;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
   let stride = nwg.x * 256u;
-  for (var i = g.x; i < n; i = i + stride) { let v = gate[i]; gate[i] = (v/(1.0+exp(-v)))*up[i]; }
+  for (var i = g.x; i < n4; i = i + stride) { let v = gate[i]; gate[i] = (v/(1.0+exp(-v)))*up[i]; }
 }`;
 var EMBED = `
 @group(0) @binding(0) var<storage,read> w: array<u32>;
 @group(0) @binding(1) var<storage,read> scale: array<f32>;
-@group(0) @binding(2) var<storage,read_write> out: array<f32>;
+@group(0) @binding(2) var<storage,read_write> out: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> m: vec2<u32>;   // id, hidden
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
-  let k = g.x; let id = m.x; let H = m.y; if (k >= H) { return; }
-  let v = unpack4xI8(w[id*(H/4u) + (k>>2u)]); let lane = k & 3u;
-  var b: i32; if (lane==0u){b=v.x;} else if (lane==1u){b=v.y;} else if (lane==2u){b=v.z;} else {b=v.w;}
-  out[k] = f32(b) * scale[id];
+  let k = g.x; let id = m.x; let H4 = m.y / 4u; if (k >= H4) { return; }
+  let v = vec4<f32>(unpack4xI8(w[id*H4 + k]));
+  out[k] = v * scale[id];
 }`;
 var EMBED_BUF = `
 @group(0) @binding(0) var<storage,read> w: array<u32>;
 @group(0) @binding(1) var<storage,read> scale: array<f32>;
-@group(0) @binding(2) var<storage,read_write> out: array<f32>;
+@group(0) @binding(2) var<storage,read_write> out: array<vec4<f32>>;
 @group(0) @binding(3) var<storage,read> idbuf: array<u32>;   // idbuf[0] = token id
 @group(0) @binding(4) var<uniform> H: u32;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
-  let k = g.x; let id = idbuf[0]; if (k >= H) { return; }
-  let v = unpack4xI8(w[id*(H/4u) + (k>>2u)]); let lane = k & 3u;
-  var b: i32; if (lane==0u){b=v.x;} else if (lane==1u){b=v.y;} else if (lane==2u){b=v.z;} else {b=v.w;}
-  out[k] = f32(b) * scale[id];
+  let k = g.x; let id = idbuf[0]; let H4 = H / 4u; if (k >= H4) { return; }
+  let v = vec4<f32>(unpack4xI8(w[id*H4 + k]));
+  out[k] = v * scale[id];
 }`;
 var RMSNORM_T = `
-@group(0) @binding(0) var<storage,read> x: array<f32>;
-@group(0) @binding(1) var<storage,read> g: array<f32>;
-@group(0) @binding(2) var<storage,read_write> y: array<f32>;
+@group(0) @binding(0) var<storage,read> x: array<vec4<f32>>;
+@group(0) @binding(1) var<storage,read> g: array<vec4<f32>>;
+@group(0) @binding(2) var<storage,read_write> y: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> m: vec2<f32>;   // K, eps
 var<workgroup> part: array<f32,256>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let tid = lid.x; let K = u32(m.x); let base = wid.x * K;
-  var s = 0.0; for (var k = tid; k < K; k = k + 256u) { let v = x[base+k]; s = s + v*v; }
+  let tid = lid.x; let K4 = u32(m.x)/4u; let base = wid.x * K4;
+  var s = 0.0; for (var k = tid; k < K4; k = k + 256u) { let v = x[base+k]; s = s + dot(v, v); }
   part[tid] = s; workgroupBarrier();
   for (var t = 128u; t > 0u; t = t/2u) { if (tid < t) { part[tid] = part[tid] + part[tid+t]; } workgroupBarrier(); }
   let inv = inverseSqrt(part[0]/m.x + m.y);
-  for (var k = tid; k < K; k = k + 256u) { y[base+k] = x[base+k]*inv*g[k]; }
+  for (var k = tid; k < K4; k = k + 256u) { y[base+k] = x[base+k]*inv*g[k]; }
 }`;
 var ROPE_T = `
-@group(0) @binding(0) var<storage,read_write> x: array<f32>;
-@group(0) @binding(1) var<storage,read> cosT: array<f32>;
-@group(0) @binding(2) var<storage,read> sinT: array<f32>;
+@group(0) @binding(0) var<storage,read_write> x: array<vec4<f32>>;
+@group(0) @binding(1) var<storage,read> cosT: array<vec4<f32>>;
+@group(0) @binding(2) var<storage,read> sinT: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> m: vec4<u32>;   // nHeads, headDim, T, pos0
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let g = gid.x; let H = m.x; let D = m.y; let T = m.z; let pos0 = m.w; let half = D/2u;
-  let perRow = H*half; if (g >= T*perRow) { return; }
-  let row = g / perRow; let r = g % perRow; let h = r / half; let j = r % half;
-  let rb = row*H*D; let lo = rb + h*D + j; let hi = lo + half; let off = (pos0+row)*D + j;
+  let g = gid.x; let H = m.x; let D4 = m.y / 4u; let T = m.z; let pos0 = m.w; let half4 = D4/2u;
+  let perRow4 = H*half4; if (g >= T*perRow4) { return; }
+  let row = g / perRow4; let r = g % perRow4; let h = r / half4; let j = r % half4;
+  let rb = row*H*D4; let lo = rb + h*D4 + j; let hi = lo + half4; let off = (pos0+row)*D4 + j;
   let c = cosT[off]; let s = sinT[off]; let xl = x[lo]; let xh = x[hi];
   x[lo] = xl*c - xh*s; x[hi] = xh*c + xl*s;
 }`;
 var EMBED_T = `
 @group(0) @binding(0) var<storage,read> w: array<u32>;
 @group(0) @binding(1) var<storage,read> scale: array<f32>;
-@group(0) @binding(2) var<storage,read_write> out: array<f32>;
+@group(0) @binding(2) var<storage,read_write> out: array<vec4<f32>>;
 @group(0) @binding(3) var<storage,read> ids: array<u32>;
 @group(0) @binding(4) var<uniform> m: vec4<u32>;   // T, H, idOffset, _
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
-  let T = m.x; let H = m.y; let N = T*H; let stride = nwg.x * 256u;
+  let T = m.x; let H4 = m.y / 4u; let N = T*H4; let stride = nwg.x * 256u;
   for (var i = gid.x; i < N; i = i + stride) {
-    let t = i / H; let k = i % H; let id = ids[m.z + t];
-    let v = unpack4xI8(w[id*(H/4u) + (k>>2u)]); let lane = k & 3u;
-    var b: i32; if (lane==0u){b=v.x;} else if (lane==1u){b=v.y;} else if (lane==2u){b=v.z;} else {b=v.w;}
-    out[i] = f32(b) * scale[id];
+    let t = i / H4; let k = i % H4; let id = ids[m.z + t];
+    let v = vec4<f32>(unpack4xI8(w[id*H4 + k]));
+    out[i] = v * scale[id];
   }
 }`;
 var ATTN_PREFILL = `
 enable subgroups;
-@group(0) @binding(0) var<storage,read> q: array<f32>;       // [T][nHeads*hd]
-@group(0) @binding(1) var<storage,read> kc: array<f32>;      // [ctx][nKV*hd]
-@group(0) @binding(2) var<storage,read> vc: array<f32>;
-@group(0) @binding(3) var<storage,read_write> o: array<f32>; // [T][nHeads*hd]
+@group(0) @binding(0) var<storage,read> q: array<vec4<f32>>;       // [T][nHeads * hd/4]
+@group(0) @binding(1) var<storage,read> kc: array<vec4<f32>>;      // [ctx][nKV * hd/4]
+@group(0) @binding(2) var<storage,read> vc: array<vec4<f32>>;
+@group(0) @binding(3) var<storage,read_write> o: array<vec4<f32>>; // [T][nHeads * hd/4]
 @group(0) @binding(4) var<uniform> m: vec4<u32>;             // nHeads, nKV, hd, T
 var<workgroup> ps: array<f32,256>;   // exp-scores for the current key block
-var<workgroup> acc: array<f32,128>;  // running weighted-V accumulator (hd<=128)
+var<workgroup> acc: array<vec4<f32>,32>;  // running weighted-V accumulator (hd<=128)
 var<workgroup> red: array<f32,64>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
   let h = wid.x; let t = wid.y; let tid = lid.x; let nHeads = m.x; let nKV = m.y; let hd = m.z;
+  let D4 = hd / 4u;
   let ctx = t + 1u; let kvh = h / (nHeads / nKV);
-  let qbase = t*nHeads*hd + h*hd; let stride = nKV*hd; let hoff = kvh*hd; let scl = 1.0/sqrt(f32(hd));
+  let qbase4 = t*nHeads*D4 + h*D4; let stride4 = nKV*D4; let hoff4 = kvh*D4; let scl = 1.0/sqrt(f32(hd));
   let nsg = (256u + sgsz - 1u) / sgsz;
-  for (var d = tid; d < hd; d = d + 256u) { acc[d] = 0.0; }
+  for (var d = tid; d < D4; d = d + 256u) { acc[d] = vec4<f32>(0.0); }
   var mrun = -1e30; var lrun = 0.0;
   let nblk = (ctx + 255u) / 256u;
   for (var blk = 0u; blk < nblk; blk = blk + 1u) {
     let kbase = blk*256u; let kk = kbase + tid;
     var s = -1e30;
-    if (kk < ctx) { var dot = 0.0; let kb = kk*stride + hoff; for (var d = 0u; d < hd; d = d + 1u) { dot = dot + q[qbase+d]*kc[kb+d]; } s = dot*scl; }
+    if (kk < ctx) {
+      var dotVal = 0.0;
+      let kb = kk*stride4 + hoff4;
+      for (var d = 0u; d < D4; d = d + 1u) {
+        dotVal = dotVal + dot(q[qbase4+d], kc[kb+d]);
+      }
+      s = dotVal*scl;
+    }
     let sgm = subgroupMax(s); if (sgid == 0u) { red[tid/sgsz] = sgm; }
     workgroupBarrier();                                   // A: block-max partials visible
     var bm = -1e30; for (var i = 0u; i < nsg; i = i + 1u) { bm = max(bm, red[i]); }
@@ -35400,62 +35348,64 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     var bs = 0.0; for (var i = 0u; i < nsg; i = i + 1u) { bs = bs + red[i]; }
     lrun = lrun*corr + bs;
     let bcount = min(256u, ctx - kbase);
-    for (var d = tid; d < hd; d = d + 256u) {
+    for (var d = tid; d < D4; d = d + 256u) {
       var aa = acc[d]*corr;
-      for (var j = 0u; j < bcount; j = j + 1u) { aa = aa + ps[j]*vc[(kbase+j)*stride + hoff + d]; }
+      let vbase = kbase*stride4 + hoff4 + d;
+      for (var j = 0u; j < bcount; j = j + 1u) { aa = aa + ps[j]*vc[vbase + j*stride4]; }
       acc[d] = aa;
     }
     mrun = mnew;
     workgroupBarrier();                                   // D: acc's ps reads done before next block
   }
   let invL = 1.0/lrun;
-  for (var d = tid; d < hd; d = d + 256u) { o[qbase + d] = acc[d]*invL; }
-}`;
+  for (var d = tid; d < D4; d = d + 256u) { o[qbase4 + d] = acc[d]*invL; }
+}
+`;
 var ATTN_PREFILL_BLOCK = `
 enable subgroups;
 struct Meta { nHeads:u32, nKV:u32, hd:u32, T:u32, qStart:u32, ctx:u32, p0:u32, p1:u32 };
-@group(0) @binding(0) var<storage,read> q: array<f32>;
-@group(0) @binding(1) var<storage,read> kc: array<f32>;
-@group(0) @binding(2) var<storage,read> vc: array<f32>;
-@group(0) @binding(3) var<storage,read_write> o: array<f32>;
+@group(0) @binding(0) var<storage,read> q: array<vec4<f32>>;
+@group(0) @binding(1) var<storage,read> kc: array<vec4<f32>>;
+@group(0) @binding(2) var<storage,read> vc: array<vec4<f32>>;
+@group(0) @binding(3) var<storage,read_write> o: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> m: Meta;
 const BQ = 4u; const BK = 128u;
 var<workgroup> ps: array<f32, 512>;    // BQ*BK
-var<workgroup> acc: array<f32, 512>;   // BQ*hd (hd<=128)
+var<workgroup> acc: array<vec4<f32>, 128>;   // BQ*D4 (D4<=32)
 var<workgroup> red: array<f32, 128>;   // BQ*subgroup-count
 @compute @workgroup_size(128)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
-  let h = wid.x; let qBlock = wid.y; let tid = lid.x; let hd = m.hd;
-  let kvh = h / (m.nHeads / m.nKV); let stride = m.nKV * hd; let hoff = kvh * hd;
+  let h = wid.x; let qBlock = wid.y; let tid = lid.x; let hd = m.hd; let D4 = hd / 4u;
+  let kvh = h / (m.nHeads / m.nKV); let stride4 = m.nKV * D4; let hoff4 = kvh * D4;
   let nsg = (128u + sgsz - 1u) / sgsz; let scl = 1.0 / sqrt(f32(hd));
   var mrun: array<f32, 4>; var lrun: array<f32, 4>;
   for (var r = 0u; r < BQ; r = r + 1u) { mrun[r] = -1e30; lrun[r] = 0.0; }
-  for (var i = tid; i < BQ*hd; i = i + 128u) { acc[i] = 0.0; }
+  for (var i = tid; i < BQ*D4; i = i + 128u) { acc[i] = vec4<f32>(0.0); }
   workgroupBarrier();
   let nblk = (m.ctx + BK - 1u) / BK;
   for (var blk = 0u; blk < nblk; blk = blk + 1u) {
     let kbase = blk * BK; let kk = kbase + tid;
     var score: array<f32, 4>;
     var validQ: array<bool, 4>;
-    var dot: array<f32, 4>;
+    var dotVal: array<f32, 4>;
     var corrRun: array<f32, 4>;
     for (var r = 0u; r < BQ; r = r + 1u) {
       let qt = qBlock * BQ + r; let absQ = m.qStart + qt;
       validQ[r] = qt < m.T && kk < m.ctx && kk <= absQ;
-      dot[r] = 0.0; score[r] = -1e30;
+      dotVal[r] = 0.0; score[r] = -1e30;
     }
     if (kk < m.ctx) {
-      let kb = kk*stride + hoff;
-      for (var d = 0u; d < hd; d = d + 1u) {
+      let kb = kk*stride4 + hoff4;
+      for (var d = 0u; d < D4; d = d + 1u) {
         let kval = kc[kb+d];
         for (var r = 0u; r < BQ; r = r + 1u) {
           let qt = qBlock * BQ + r;
-          if (validQ[r]) { dot[r] = dot[r] + q[qt*m.nHeads*hd + h*hd + d] * kval; }
+          if (validQ[r]) { dotVal[r] = dotVal[r] + dot(q[qt*m.nHeads*D4 + h*D4 + d], kval); }
         }
       }
       for (var r = 0u; r < BQ; r = r + 1u) {
-        if (validQ[r]) { score[r] = dot[r] * scl; }
+        if (validQ[r]) { score[r] = dotVal[r] * scl; }
       }
     }
     for (var r = 0u; r < BQ; r = r + 1u) {
@@ -35478,40 +35428,49 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
       workgroupBarrier();
     }
     let bcount = min(BK, m.ctx - kbase);
-    for (var d = tid; d < hd; d = d + 128u) {
-      var aa: array<f32, 4>;
-      for (var r = 0u; r < BQ; r = r + 1u) { aa[r] = acc[r*hd+d] * corrRun[r]; }
+    for (var d = tid; d < D4; d = d + 128u) {
+      var aa: array<vec4<f32>, 4>;
+      for (var r = 0u; r < BQ; r = r + 1u) { aa[r] = acc[r*D4+d] * corrRun[r]; }
       for (var j = 0u; j < bcount; j = j + 1u) {
-        let vv = vc[(kbase+j)*stride + hoff + d];
-        for (var r = 0u; r < BQ; r = r + 1u) { aa[r] = aa[r] + ps[r*BK+j] * vv; }
+        let vv = vc[(kbase+j)*stride4 + hoff4 + d];
+        for (var r = 0u; r < BQ; r = r + 1u) { aa[r] = aa[r] + fill_node_val(r, j) * vv; }
       }
-      for (var r = 0u; r < BQ; r = r + 1u) { acc[r*hd+d] = aa[r]; }
+      for (var r = 0u; r < BQ; r = r + 1u) { acc[r*D4+d] = aa[r]; }
     }
     workgroupBarrier();
   }
   for (var r = 0u; r < BQ; r = r + 1u) {
     let qt = qBlock * BQ + r;
     if (qt < m.T) {
-      let invL = 1.0 / lrun[r]; let ob = qt*m.nHeads*hd + h*hd;
-      for (var d = tid; d < hd; d = d + 128u) { o[ob+d] = acc[r*hd+d] * invL; }
+      let invL = 1.0 / lrun[r]; let ob = qt*m.nHeads*D4 + h*D4;
+      for (var d = tid; d < D4; d = d + 128u) { o[ob+d] = acc[r*D4+d] * invL; }
     }
   }
+}
+fn fill_node_val(r: u32, j: u32) -> f32 {
+  return ps[r*BK + j];
 }`;
 var ARGMAX = `
-@group(0) @binding(0) var<storage,read> logits: array<f32>;
+@group(0) @binding(0) var<storage,read> logits: array<vec4<f32>>;
 @group(0) @binding(1) var<storage,read_write> out: array<u32>;
 @group(0) @binding(2) var<uniform> n: u32;
 var<workgroup> bv: array<f32,256>; var<workgroup> bi: array<u32,256>;
 @compute @workgroup_size(256)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
-  let tid = lid.x; var v = -1e30; var idx = 0xffffffffu;
-  for (var i = tid; i < n; i = i + 256u) { let x = logits[i]; if (x > v || (x == v && i < idx)) { v = x; idx = i; } }
+  let tid = lid.x; let n4 = n / 4u; var v = -1e30; var idx = 0xffffffffu;
+  for (var i = tid; i < n4; i = i + 256u) {
+    let x = logits[i]; let base_idx = i * 4u;
+    if (x.x > v || (x.x == v && base_idx < idx)) { v = x.x; idx = base_idx; }
+    if (x.y > v || (x.y == v && base_idx + 1u < idx)) { v = x.y; idx = base_idx + 1u; }
+    if (x.z > v || (x.z == v && base_idx + 2u < idx)) { v = x.z; idx = base_idx + 2u; }
+    if (x.w > v || (x.w == v && base_idx + 3u < idx)) { v = x.w; idx = base_idx + 3u; }
+  }
   bv[tid] = v; bi[tid] = idx; workgroupBarrier();
   for (var s = 128u; s > 0u; s = s/2u) { if (tid < s) { let ov = bv[tid+s]; let oi = bi[tid+s]; if (ov > bv[tid] || (ov == bv[tid] && oi < bi[tid])) { bv[tid] = ov; bi[tid] = oi; } } workgroupBarrier(); }
   if (tid == 0u) { out[0] = bi[0]; }
 }`;
 var TOPK_SELECT = `
-@group(0) @binding(0) var<storage,read> logits: array<f32>;
+@group(0) @binding(0) var<storage,read> logits: array<vec4<f32>>;
 @group(0) @binding(1) var<storage,read_write> ids: array<u32>;
 @group(0) @binding(2) var<storage,read_write> vals: array<f32>;
 @group(0) @binding(3) var<uniform> m: vec2<u32>; // vocabSize, selectedCount
@@ -35522,11 +35481,18 @@ fn alreadySelected(id: u32, n: u32) -> bool {
 }
 @compute @workgroup_size(256)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
-  let tid = lid.x; let n = m.x; let selected = m.y;
+  let tid = lid.x; let n = m.x; let selected = m.y; let n4 = n / 4u;
   var v = -1e30; var idx = 0xffffffffu;
-  for (var i = tid; i < n; i = i + 256u) {
-    let x = logits[i];
-    if (!alreadySelected(i, selected) && (x > v || (x == v && i < idx))) { v = x; idx = i; }
+  for (var i = tid; i < n4; i = i + 256u) {
+    let x = logits[i]; let base_idx = i * 4u;
+    let id0 = base_idx;
+    if (!alreadySelected(id0, selected) && (x.x > v || (x.x == v && id0 < idx))) { v = x.x; idx = id0; }
+    let id1 = base_idx + 1u;
+    if (!alreadySelected(id1, selected) && (x.y > v || (x.y == v && id1 < idx))) { v = x.y; idx = id1; }
+    let id2 = base_idx + 2u;
+    if (!alreadySelected(id2, selected) && (x.z > v || (x.z == v && id2 < idx))) { v = x.z; idx = id2; }
+    let id3 = base_idx + 3u;
+    if (!alreadySelected(id3, selected) && (x.w > v || (x.w == v && id3 < idx))) { v = x.w; idx = id3; }
   }
   bv[tid] = v; bi[tid] = idx; workgroupBarrier();
   for (var s = 128u; s > 0u; s = s/2u) {
@@ -35541,7 +35507,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
 var GEMV4 = `
 enable subgroups;
 struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scaleLo:f32, gpr:u32 };
-@group(0) @binding(0) var<storage,read> x: array<f32>;
+@group(0) @binding(0) var<storage,read> x: array<vec4<f32>>;
 @group(0) @binding(1) var<storage,read> w: array<u32>;
 @group(0) @binding(2) var<storage,read> scale: array<f32>;
 @group(0) @binding(3) var<storage,read> bias: array<f32>;
@@ -35549,32 +35515,37 @@ struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scale
 @group(0) @binding(5) var<storage,read> loraB: array<f32>;
 @group(0) @binding(6) var<storage,read_write> y: array<f32>;
 @group(0) @binding(7) var<uniform> m: Meta;
-var<workgroup> part: array<f32,64>;       // one slot per subgroup
-@compute @workgroup_size(64)
+var<workgroup> part: array<f32,32>;       // one slot per subgroup
+@compute @workgroup_size(32)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
   let n = wid.x + wid.y * m.gridX; let tid = lid.x;
   if (n >= m.N) { return; }               // workgroup-uniform: whole group exits together
   let K8 = m.K/8u; let rb = n*K8; let sbase = n*m.gpr;
   var acc = 0.0;
-  for (var c = tid; c < K8; c = c + 64u) {
+  for (var c = tid; c < K8; c = c + 32u) {
     let word = w[rb+c]; let bk = c*8u; let sc = scale[sbase + (bk >> 7u)];
-    var p = 0.0;
-    p = p + x[bk]    * f32(i32(word << 28u) >> 28u);
-    p = p + x[bk+1u] * f32(i32(word << 24u) >> 28u);
-    p = p + x[bk+2u] * f32(i32(word << 20u) >> 28u);
-    p = p + x[bk+3u] * f32(i32(word << 16u) >> 28u);
-    p = p + x[bk+4u] * f32(i32(word << 12u) >> 28u);
-    p = p + x[bk+5u] * f32(i32(word << 8u)  >> 28u);
-    p = p + x[bk+6u] * f32(i32(word << 4u)  >> 28u);
-    p = p + x[bk+7u] * f32(i32(word)        >> 28u);
-    acc = acc + p * sc;
+    let vx0 = x[c*2u];
+    let vx1 = x[c*2u + 1u];
+    let vw0 = vec4<f32>(
+      f32(i32(word << 28u) >> 28u),
+      f32(i32(word << 24u) >> 28u),
+      f32(i32(word << 20u) >> 28u),
+      f32(i32(word << 16u) >> 28u)
+    );
+    let vw1 = vec4<f32>(
+      f32(i32(word << 12u) >> 28u),
+      f32(i32(word << 8u)  >> 28u),
+      f32(i32(word << 4u)  >> 28u),
+      f32(i32(word)        >> 28u)
+    );
+    acc = acc + (dot(vx0, vw0) + dot(vx1, vw1)) * sc;
   }
   let ssum = subgroupAdd(acc);            // reduce within subgroup (no barrier)
   if (sgid == 0u) { part[tid / sgsz] = ssum; }
   workgroupBarrier();
   if (tid == 0u) {
-    let nsg = (64u + sgsz - 1u) / sgsz; var o = 0.0;
+    let nsg = (32u + sgsz - 1u) / sgsz; var o = 0.0;
     for (var i = 0u; i < nsg; i = i + 1u) { o = o + part[i]; }
     if (m.hasBias == 1u) { o = o + bias[n]; }
     if (m.hasLora == 1u) { var dl = 0.0; for (var r = 0u; r < m.rank; r = r + 1u) { dl = dl + loraD[r] * loraB[r*m.N + n]; } o = o + m.scaleLo * dl; }
@@ -35584,7 +35555,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 var GEMV4_ADD = `
 enable subgroups;
 struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scaleLo:f32, gpr:u32 };
-@group(0) @binding(0) var<storage,read> x: array<f32>;
+@group(0) @binding(0) var<storage,read> x: array<vec4<f32>>;
 @group(0) @binding(1) var<storage,read> w: array<u32>;
 @group(0) @binding(2) var<storage,read> scale: array<f32>;
 @group(0) @binding(3) var<storage,read> bias: array<f32>;
@@ -35592,32 +35563,37 @@ struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scale
 @group(0) @binding(5) var<storage,read> loraB: array<f32>;
 @group(0) @binding(6) var<storage,read_write> y: array<f32>;
 @group(0) @binding(7) var<uniform> m: Meta;
-var<workgroup> part: array<f32,64>;
-@compute @workgroup_size(64)
+var<workgroup> part: array<f32,32>;
+@compute @workgroup_size(32)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
   let n = wid.x + wid.y * m.gridX; let tid = lid.x;
   if (n >= m.N) { return; }
   let K8 = m.K/8u; let rb = n*K8; let sbase = n*m.gpr;
   var acc = 0.0;
-  for (var c = tid; c < K8; c = c + 64u) {
+  for (var c = tid; c < K8; c = c + 32u) {
     let word = w[rb+c]; let bk = c*8u; let sc = scale[sbase + (bk >> 7u)];
-    var p = 0.0;
-    p = p + x[bk]    * f32(i32(word << 28u) >> 28u);
-    p = p + x[bk+1u] * f32(i32(word << 24u) >> 28u);
-    p = p + x[bk+2u] * f32(i32(word << 20u) >> 28u);
-    p = p + x[bk+3u] * f32(i32(word << 16u) >> 28u);
-    p = p + x[bk+4u] * f32(i32(word << 12u) >> 28u);
-    p = p + x[bk+5u] * f32(i32(word << 8u)  >> 28u);
-    p = p + x[bk+6u] * f32(i32(word << 4u)  >> 28u);
-    p = p + x[bk+7u] * f32(i32(word)        >> 28u);
-    acc = acc + p * sc;
+    let vx0 = x[c*2u];
+    let vx1 = x[c*2u + 1u];
+    let vw0 = vec4<f32>(
+      f32(i32(word << 28u) >> 28u),
+      f32(i32(word << 24u) >> 28u),
+      f32(i32(word << 20u) >> 28u),
+      f32(i32(word << 16u) >> 28u)
+    );
+    let vw1 = vec4<f32>(
+      f32(i32(word << 12u) >> 28u),
+      f32(i32(word << 8u)  >> 28u),
+      f32(i32(word << 4u)  >> 28u),
+      f32(i32(word)        >> 28u)
+    );
+    acc = acc + (dot(vx0, vw0) + dot(vx1, vw1)) * sc;
   }
   let ssum = subgroupAdd(acc);
   if (sgid == 0u) { part[tid / sgsz] = ssum; }
   workgroupBarrier();
   if (tid == 0u) {
-    let nsg = (64u + sgsz - 1u) / sgsz; var o = 0.0;
+    let nsg = (32u + sgsz - 1u) / sgsz; var o = 0.0;
     for (var i = 0u; i < nsg; i = i + 1u) { o = o + part[i]; }
     if (m.hasBias == 1u) { o = o + bias[n]; }
     if (m.hasLora == 1u) { var dl = 0.0; for (var r = 0u; r < m.rank; r = r + 1u) { dl = dl + loraD[r] * loraB[r*m.N + n]; } o = o + m.scaleLo * dl; }
@@ -35627,7 +35603,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 var QKV_GEMV4 = `
 enable subgroups;
 struct Meta { K:u32, totalN:u32, qN:u32, kN:u32, vN:u32, gpr:u32, gridX:u32, p0:u32 };
-@group(0) @binding(0) var<storage,read> x: array<f32>;
+@group(0) @binding(0) var<storage,read> x: array<vec4<f32>>;
 @group(0) @binding(1) var<storage,read> w: array<u32>;
 @group(0) @binding(2) var<storage,read> scale: array<f32>;
 @group(0) @binding(3) var<storage,read> bias: array<f32>;
@@ -35635,32 +35611,37 @@ struct Meta { K:u32, totalN:u32, qN:u32, kN:u32, vN:u32, gpr:u32, gridX:u32, p0:
 @group(0) @binding(5) var<storage,read_write> kOut: array<f32>;
 @group(0) @binding(6) var<storage,read_write> vOut: array<f32>;
 @group(0) @binding(7) var<uniform> m: Meta;
-var<workgroup> part: array<f32,64>;
-@compute @workgroup_size(64)
+var<workgroup> part: array<f32,32>;
+@compute @workgroup_size(32)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
   let n = wid.x + wid.y * m.gridX; let tid = lid.x;
   if (n >= m.totalN) { return; }
   let K8 = m.K/8u; let rb = n*K8; let sbase = n*m.gpr;
   var acc = 0.0;
-  for (var c = tid; c < K8; c = c + 64u) {
+  for (var c = tid; c < K8; c = c + 32u) {
     let word = w[rb+c]; let bk = c*8u; let sc = scale[sbase + (bk >> 7u)];
-    var p = 0.0;
-    p = p + x[bk]    * f32(i32(word << 28u) >> 28u);
-    p = p + x[bk+1u] * f32(i32(word << 24u) >> 28u);
-    p = p + x[bk+2u] * f32(i32(word << 20u) >> 28u);
-    p = p + x[bk+3u] * f32(i32(word << 16u) >> 28u);
-    p = p + x[bk+4u] * f32(i32(word << 12u) >> 28u);
-    p = p + x[bk+5u] * f32(i32(word << 8u)  >> 28u);
-    p = p + x[bk+6u] * f32(i32(word << 4u)  >> 28u);
-    p = p + x[bk+7u] * f32(i32(word)        >> 28u);
-    acc = acc + p * sc;
+    let vx0 = x[c*2u];
+    let vx1 = x[c*2u + 1u];
+    let vw0 = vec4<f32>(
+      f32(i32(word << 28u) >> 28u),
+      f32(i32(word << 24u) >> 28u),
+      f32(i32(word << 20u) >> 28u),
+      f32(i32(word << 16u) >> 28u)
+    );
+    let vw1 = vec4<f32>(
+      f32(i32(word << 12u) >> 28u),
+      f32(i32(word << 8u)  >> 28u),
+      f32(i32(word << 4u)  >> 28u),
+      f32(i32(word)        >> 28u)
+    );
+    acc = acc + (dot(vx0, vw0) + dot(vx1, vw1)) * sc;
   }
   let ssum = subgroupAdd(acc);
   if (sgid == 0u) { part[tid / sgsz] = ssum; }
   workgroupBarrier();
   if (tid == 0u) {
-    let nsg = (64u + sgsz - 1u) / sgsz; var o = 0.0;
+    let nsg = (32u + sgsz - 1u) / sgsz; var o = 0.0;
     for (var i = 0u; i < nsg; i = i + 1u) { o = o + part[i]; }
     o = o + bias[n];
     if (n < m.qN) {
@@ -35676,7 +35657,7 @@ var GATE_UP_SILU_GEMV4 = `
 enable subgroups;
 struct Meta0 { K:u32, N:u32, gpr:u32, gridX:u32, gateRank:u32, upRank:u32, hasGateLora:u32, hasUpLora:u32 };
 struct Meta1 { gateScaleLo:f32, upScaleLo:f32, p0:f32, p1:f32 };
-@group(0) @binding(0) var<storage,read> x: array<f32>;
+@group(0) @binding(0) var<storage,read> x: array<vec4<f32>>;
 @group(0) @binding(1) var<storage,read> w: array<u32>;
 @group(0) @binding(2) var<storage,read> scale: array<f32>;
 @group(0) @binding(3) var<storage,read_write> y: array<f32>;
@@ -35686,9 +35667,9 @@ struct Meta1 { gateScaleLo:f32, upScaleLo:f32, p0:f32, p1:f32 };
 @group(0) @binding(7) var<storage,read> upB: array<f32>;
 @group(0) @binding(8) var<uniform> m0: Meta0;
 @group(0) @binding(9) var<uniform> m1: Meta1;
-var<workgroup> partG: array<f32,64>;
-var<workgroup> partU: array<f32,64>;
-@compute @workgroup_size(64)
+var<workgroup> partG: array<f32,32>;
+var<workgroup> partU: array<f32,32>;
+@compute @workgroup_size(32)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
   let n = wid.x + wid.y * m0.gridX; let tid = lid.x;
@@ -35696,23 +35677,43 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   let K8 = m0.K/8u; let rbG = n*K8; let rbU = (m0.N + n)*K8;
   let sbG = n*m0.gpr; let sbU = (m0.N + n)*m0.gpr;
   var accG = 0.0; var accU = 0.0;
-  for (var c = tid; c < K8; c = c + 64u) {
+  for (var c = tid; c < K8; c = c + 32u) {
     let bk = c*8u; let wg = w[rbG+c]; let wu = w[rbU+c];
     let scG = scale[sbG + (bk >> 7u)]; let scU = scale[sbU + (bk >> 7u)];
-    let x0=x[bk]; let x1=x[bk+1u]; let x2=x[bk+2u]; let x3=x[bk+3u];
-    let x4=x[bk+4u]; let x5=x[bk+5u]; let x6=x[bk+6u]; let x7=x[bk+7u];
-    var pg = 0.0; var pu = 0.0;
-    pg = pg + x0*f32(i32(wg<<28u)>>28u) + x1*f32(i32(wg<<24u)>>28u) + x2*f32(i32(wg<<20u)>>28u) + x3*f32(i32(wg<<16u)>>28u);
-    pg = pg + x4*f32(i32(wg<<12u)>>28u) + x5*f32(i32(wg<<8u)>>28u)  + x6*f32(i32(wg<<4u)>>28u)  + x7*f32(i32(wg)>>28u);
-    pu = pu + x0*f32(i32(wu<<28u)>>28u) + x1*f32(i32(wu<<24u)>>28u) + x2*f32(i32(wu<<20u)>>28u) + x3*f32(i32(wu<<16u)>>28u);
-    pu = pu + x4*f32(i32(wu<<12u)>>28u) + x5*f32(i32(wu<<8u)>>28u)  + x6*f32(i32(wu<<4u)>>28u)  + x7*f32(i32(wu)>>28u);
-    accG = accG + pg * scG; accU = accU + pu * scU;
+    let vx0 = x[c*2u];
+    let vx1 = x[c*2u + 1u];
+    let vwg0 = vec4<f32>(
+      f32(i32(wg << 28u) >> 28u),
+      f32(i32(wg << 24u) >> 28u),
+      f32(i32(wg << 20u) >> 28u),
+      f32(i32(wg << 16u) >> 28u)
+    );
+    let vwg1 = vec4<f32>(
+      f32(i32(wg << 12u) >> 28u),
+      f32(i32(wg << 8u)  >> 28u),
+      f32(i32(wg << 4u)  >> 28u),
+      f32(i32(wg)        >> 28u)
+    );
+    let vwu0 = vec4<f32>(
+      f32(i32(wu << 28u) >> 28u),
+      f32(i32(wu << 24u) >> 28u),
+      f32(i32(wu << 20u) >> 28u),
+      f32(i32(wu << 16u) >> 28u)
+    );
+    let vwu1 = vec4<f32>(
+      f32(i32(wu << 12u) >> 28u),
+      f32(i32(wu << 8u)  >> 28u),
+      f32(i32(wu << 4u)  >> 28u),
+      f32(i32(wu)        >> 28u)
+    );
+    accG = accG + (dot(vx0, vwg0) + dot(vx1, vwg1)) * scG;
+    accU = accU + (dot(vx0, vwu0) + dot(vx1, vwu1)) * scU;
   }
   let sg = subgroupAdd(accG); let su = subgroupAdd(accU);
   if (sgid == 0u) { partG[tid / sgsz] = sg; partU[tid / sgsz] = su; }
   workgroupBarrier();
   if (tid == 0u) {
-    let nsg = (64u + sgsz - 1u) / sgsz; var gate = 0.0; var up = 0.0;
+    let nsg = (32u + sgsz - 1u) / sgsz; var gate = 0.0; var up = 0.0;
     for (var i = 0u; i < nsg; i = i + 1u) { gate = gate + partG[i]; up = up + partU[i]; }
     if (m0.hasGateLora == 1u) {
       var dl = 0.0; for (var r = 0u; r < m0.gateRank; r = r + 1u) { dl = dl + gateD[r] * gateB[r*m0.N + n]; }
@@ -35725,830 +35726,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     y[n] = (gate / (1.0 + exp(-gate))) * up;
   }
 }`;
-var DYN_QUANT_X = `
-@group(0) @binding(0) var<storage, read> x: array<f32>;
-@group(0) @binding(1) var<storage, read_write> x_q: array<u32>;
-@group(0) @binding(2) var<storage, read_write> scale_x: array<f32>;
-@group(0) @binding(3) var<uniform> K: u32;
-var<workgroup> sh_max: array<f32, 64>;
-@compute @workgroup_size(64)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let g = wid.x; let tid = lid.x; let base = g * 128u;
-  var local_max = 0.0;
-  let idx0 = base + tid; let idx1 = base + tid + 64u;
-  if (idx0 < K) { local_max = max(local_max, abs(x[idx0])); }
-  if (idx1 < K) { local_max = max(local_max, abs(x[idx1])); }
-  sh_max[tid] = local_max;
-  workgroupBarrier();
-  for (var s = 32u; s > 0u; s = s / 2u) {
-    if (tid < s) { sh_max[tid] = max(sh_max[tid], sh_max[tid + s]); }
-    workgroupBarrier();
-  }
-  let gmax = sh_max[0]; let scale = select(gmax / 127.0, 1.0, gmax == 0.0);
-  if (tid == 0u) { scale_x[g] = scale; }
-  let pidx = base + tid * 4u;
-  if (pidx < K) {
-    let q0 = clamp(i32(round(x[pidx] / scale)), -128, 127) & 0xff;
-    let q1 = clamp(i32(round(x[pidx + 1u] / scale)), -128, 127) & 0xff;
-    let q2 = clamp(i32(round(x[pidx + 2u] / scale)), -128, 127) & 0xff;
-    let q3 = clamp(i32(round(x[pidx + 3u] / scale)), -128, 127) & 0xff;
-    x_q[g * 32u + tid] = u32(q0 | (q1 << 8u) | (q2 << 16u) | (q3 << 24u));
-  }
-}
-`;
-var DYN_QUANT_X_T = `
-@group(0) @binding(0) var<storage, read> x: array<f32>;
-@group(0) @binding(1) var<storage, read_write> x_q: array<u32>;
-@group(0) @binding(2) var<storage, read_write> scale_x: array<f32>;
-@group(0) @binding(3) var<uniform> m: vec2<u32>; // K, T
-var<workgroup> sh_max: array<f32, 64>;
-@compute @workgroup_size(64)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let g = wid.x; let t = wid.y; let tid = lid.x; let K = m.x; let T = m.y;
-  if (t >= T) { return; }
-  let row_base = t * K; let base = row_base + g * 128u;
-  var local_max = 0.0;
-  let idx0 = base + tid; let idx1 = base + tid + 64u;
-  if (g * 128u + tid < K) { local_max = max(local_max, abs(x[idx0])); }
-  if (g * 128u + tid + 64u < K) { local_max = max(local_max, abs(x[idx1])); }
-  sh_max[tid] = local_max;
-  workgroupBarrier();
-  for (var s = 32u; s > 0u; s = s / 2u) {
-    if (tid < s) { sh_max[tid] = max(sh_max[tid], sh_max[tid + s]); }
-    workgroupBarrier();
-  }
-  let gmax = sh_max[0]; let scale = select(gmax / 127.0, 1.0, gmax == 0.0);
-  let groupsPerRow = K / 128u;
-  if (tid == 0u) { scale_x[t * groupsPerRow + g] = scale; }
-  let pidx = base + tid * 4u;
-  if (g * 128u + tid * 4u < K) {
-    let q0 = clamp(i32(round(x[pidx] / scale)), -128, 127) & 0xff;
-    let q1 = clamp(i32(round(x[pidx + 1u] / scale)), -128, 127) & 0xff;
-    let q2 = clamp(i32(round(x[pidx + 2u] / scale)), -128, 127) & 0xff;
-    let q3 = clamp(i32(round(x[pidx + 3u] / scale)), -128, 127) & 0xff;
-    x_q[t * (K / 4u) + g * 32u + tid] = u32(q0 | (q1 << 8u) | (q2 << 16u) | (q3 << 24u));
-  }
-}
-`;
-var GEMV4_W4A8 = (hasDP4a, wgSize = 64) => `
-enable subgroups;
-${hasDP4a ? "enable packed_4x8_integer_dot_product;" : ""}
-struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scaleLo:f32, gpr:u32 };
-@group(0) @binding(0) var<storage,read> x_q: array<u32>;
-@group(0) @binding(1) var<storage,read> scale_x: array<f32>;
-@group(0) @binding(2) var<storage,read> w: array<u32>;
-@group(0) @binding(3) var<storage,read> scale: array<f32>;
-@group(0) @binding(4) var<storage,read> bias: array<f32>;
-@group(0) @binding(5) var<storage,read> loraD: array<f32>;
-@group(0) @binding(6) var<storage,read> loraB: array<f32>;
-@group(0) @binding(7) var<storage,read_write> y: array<f32>;
-@group(0) @binding(8) var<uniform> m: Meta;
-
-${hasDP4a ? "" : `
-fn dot4I8Packed(a: u32, b: u32) -> i32 {
-  let va = unpack4xI8(a);
-  let vb = unpack4xI8(b);
-  return va.x * vb.x + va.y * vb.y + va.z * vb.z + va.w * vb.w;
-}
-`}
-
-var<workgroup> part: array<f32, ${wgSize}>;
-@compute @workgroup_size(${wgSize})
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
-  let n = wid.x + wid.y * m.gridX; let tid = lid.x;
-  if (n >= m.N) { return; }
-  let K8 = m.K/8u; let rb = n*K8; let sbase = n*m.gpr;
-  var acc = 0.0;
-  for (var c = tid; c < K8; c = c + ${wgSize}u) {
-    let word = w[rb+c]; let bk = c*8u;
-    let sc_w = scale[sbase + (bk >> 7u)];
-    let sc_x = scale_x[bk >> 7u];
-    let w0 = (i32(word << 28u) >> 28u) & 0xff;
-    let w1 = (i32(word << 24u) >> 28u) & 0xff;
-    let w2 = (i32(word << 20u) >> 28u) & 0xff;
-    let w3 = (i32(word << 16u) >> 28u) & 0xff;
-    let w4 = (i32(word << 12u) >> 28u) & 0xff;
-    let w5 = (i32(word << 8u)  >> 28u) & 0xff;
-    let w6 = (i32(word << 4u)  >> 28u) & 0xff;
-    let w7 = (i32(word)        >> 28u) & 0xff;
-    let pw0 = u32(w0 | (w1 << 8u) | (w2 << 16u) | (w3 << 24u));
-    let pw1 = u32(w4 | (w5 << 8u) | (w6 << 16u) | (w7 << 24u));
-    let px0 = x_q[c * 2u];
-    let px1 = x_q[c * 2u + 1u];
-    let sum = dot4I8Packed(pw0, px0) + dot4I8Packed(pw1, px1);
-    acc = acc + f32(sum) * sc_w * sc_x;
-  }
-  let ssum = subgroupAdd(acc);
-  if (sgid == 0u) { part[tid / sgsz] = ssum; }
-  workgroupBarrier();
-  if (tid == 0u) {
-    let nsg = (${wgSize}u + sgsz - 1u) / sgsz; var o = 0.0;
-    for (var i = 0u; i < nsg; i = i + 1u) { o = o + part[i]; }
-    if (m.hasBias == 1u) { o = o + bias[n]; }
-    if (m.hasLora == 1u) { var dl = 0.0; for (var r = 0u; r < m.rank; r = r + 1u) { dl = dl + loraD[r] * loraB[r*m.N + n]; } o = o + m.scaleLo * dl; }
-    y[n] = o;
-  }
-}
-`;
-var GEMV4_ADD_W4A8 = (hasDP4a, wgSize = 64) => `
-enable subgroups;
-${hasDP4a ? "enable packed_4x8_integer_dot_product;" : ""}
-struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scaleLo:f32, gpr:u32 };
-@group(0) @binding(0) var<storage,read> x_q: array<u32>;
-@group(0) @binding(1) var<storage,read> scale_x: array<f32>;
-@group(0) @binding(2) var<storage,read> w: array<u32>;
-@group(0) @binding(3) var<storage,read> scale: array<f32>;
-@group(0) @binding(4) var<storage,read> bias: array<f32>;
-@group(0) @binding(5) var<storage,read> loraD: array<f32>;
-@group(0) @binding(6) var<storage,read> loraB: array<f32>;
-@group(0) @binding(7) var<storage,read_write> y: array<f32>;
-@group(0) @binding(8) var<uniform> m: Meta;
-
-${hasDP4a ? "" : `
-fn dot4I8Packed(a: u32, b: u32) -> i32 {
-  let va = unpack4xI8(a);
-  let vb = unpack4xI8(b);
-  return va.x * vb.x + va.y * vb.y + va.z * vb.z + va.w * vb.w;
-}
-`}
-
-var<workgroup> part: array<f32, ${wgSize}>;
-@compute @workgroup_size(${wgSize})
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
-  let n = wid.x + wid.y * m.gridX; let tid = lid.x;
-  if (n >= m.N) { return; }
-  let K8 = m.K/8u; let rb = n*K8; let sbase = n*m.gpr;
-  var acc = 0.0;
-  for (var c = tid; c < K8; c = c + ${wgSize}u) {
-    let word = w[rb+c]; let bk = c*8u;
-    let sc_w = scale[sbase + (bk >> 7u)];
-    let sc_x = scale_x[bk >> 7u];
-    let w0 = (i32(word << 28u) >> 28u) & 0xff;
-    let w1 = (i32(word << 24u) >> 28u) & 0xff;
-    let w2 = (i32(word << 20u) >> 28u) & 0xff;
-    let w3 = (i32(word << 16u) >> 28u) & 0xff;
-    let w4 = (i32(word << 12u) >> 28u) & 0xff;
-    let w5 = (i32(word << 8u)  >> 28u) & 0xff;
-    let w6 = (i32(word << 4u)  >> 28u) & 0xff;
-    let w7 = (i32(word)        >> 28u) & 0xff;
-    let pw0 = u32(w0 | (w1 << 8u) | (w2 << 16u) | (w3 << 24u));
-    let pw1 = u32(w4 | (w5 << 8u) | (w6 << 16u) | (w7 << 24u));
-    let px0 = x_q[c * 2u];
-    let px1 = x_q[c * 2u + 1u];
-    let sum = dot4I8Packed(pw0, px0) + dot4I8Packed(pw1, px1);
-    acc = acc + f32(sum) * sc_w * sc_x;
-  }
-  let ssum = subgroupAdd(acc);
-  if (sgid == 0u) { part[tid / sgsz] = ssum; }
-  workgroupBarrier();
-  if (tid == 0u) {
-    let nsg = (${wgSize}u + sgsz - 1u) / sgsz; var o = 0.0;
-    for (var i = 0u; i < nsg; i = i + 1u) { o = o + part[i]; }
-    if (m.hasBias == 1u) { o = o + bias[n]; }
-    if (m.hasLora == 1u) { var dl = 0.0; for (var r = 0u; r < m.rank; r = r + 1u) { dl = dl + loraD[r] * loraB[r*m.N + n]; } o = o + m.scaleLo * dl; }
-    y[n] = y[n] + o;
-  }
-}
-`;
-var QKV_GEMV4_W4A8 = (hasDP4a, wgSize = 64) => `
-enable subgroups;
-${hasDP4a ? "enable packed_4x8_integer_dot_product;" : ""}
-struct Meta { K:u32, totalN:u32, qN:u32, kN:u32, vN:u32, gpr:u32, gridX:u32, p0:u32 };
-@group(0) @binding(0) var<storage,read> x_q: array<u32>;
-@group(0) @binding(1) var<storage,read> scale_x: array<f32>;
-@group(0) @binding(2) var<storage,read> w: array<u32>;
-@group(0) @binding(3) var<storage,read> scale: array<f32>;
-@group(0) @binding(4) var<storage,read> bias: array<f32>;
-@group(0) @binding(5) var<storage,read_write> qOut: array<f32>;
-@group(0) @binding(6) var<storage,read_write> kOut: array<f32>;
-@group(0) @binding(7) var<storage,read_write> vOut: array<f32>;
-@group(0) @binding(8) var<uniform> m: Meta;
-
-${hasDP4a ? "" : `
-fn dot4I8Packed(a: u32, b: u32) -> i32 {
-  let va = unpack4xI8(a);
-  let vb = unpack4xI8(b);
-  return va.x * vb.x + va.y * vb.y + va.z * vb.z + va.w * vb.w;
-}
-`}
-
-var<workgroup> part: array<f32, ${wgSize}>;
-@compute @workgroup_size(${wgSize})
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
-  let n = wid.x + wid.y * m.gridX; let tid = lid.x;
-  if (n >= m.totalN) { return; }
-  let K8 = m.K/8u; let rb = n*K8; let sbase = n*m.gpr;
-  var acc = 0.0;
-  for (var c = tid; c < K8; c = c + ${wgSize}u) {
-    let word = w[rb+c]; let bk = c*8u;
-    let sc_w = scale[sbase + (bk >> 7u)];
-    let sc_x = scale_x[bk >> 7u];
-    let w0 = (i32(word << 28u) >> 28u) & 0xff;
-    let w1 = (i32(word << 24u) >> 28u) & 0xff;
-    let w2 = (i32(word << 20u) >> 28u) & 0xff;
-    let w3 = (i32(word << 16u) >> 28u) & 0xff;
-    let w4 = (i32(word << 12u) >> 28u) & 0xff;
-    let w5 = (i32(word << 8u)  >> 28u) & 0xff;
-    let w6 = (i32(word << 4u)  >> 28u) & 0xff;
-    let w7 = (i32(word)        >> 28u) & 0xff;
-    let pw0 = u32(w0 | (w1 << 8u) | (w2 << 16u) | (w3 << 24u));
-    let pw1 = u32(w4 | (w5 << 8u) | (w6 << 16u) | (w7 << 24u));
-    let px0 = x_q[c * 2u];
-    let px1 = x_q[c * 2u + 1u];
-    let sum = dot4I8Packed(pw0, px0) + dot4I8Packed(pw1, px1);
-    acc = acc + f32(sum) * sc_w * sc_x;
-  }
-  let ssum = subgroupAdd(acc);
-  if (sgid == 0u) { part[tid / sgsz] = ssum; }
-  workgroupBarrier();
-  if (tid == 0u) {
-    let nsg = (${wgSize}u + sgsz - 1u) / sgsz; var o = 0.0;
-    for (var i = 0u; i < nsg; i = i + 1u) { o = o + part[i]; }
-    o = o + bias[n];
-    if (n < m.qN) {
-      qOut[n] = o;
-    } else if (n < m.qN + m.kN) {
-      kOut[n - m.qN] = o;
-    } else {
-      vOut[n - m.qN - m.kN] = o;
-    }
-  }
-}
-`;
-var GATE_UP_SILU_GEMV4_W4A8 = (hasDP4a, wgSize = 64) => `
-enable subgroups;
-${hasDP4a ? "enable packed_4x8_integer_dot_product;" : ""}
-struct Meta0 { K:u32, N:u32, gpr:u32, gridX:u32, gateRank:u32, upRank:u32, hasGateLora:u32, hasUpLora:u32 };
-struct Meta1 { gateScaleLo:f32, upScaleLo:f32, p0:f32, p1:f32 };
-@group(0) @binding(0) var<storage,read> x_q: array<u32>;
-@group(0) @binding(1) var<storage,read> scale_x: array<f32>;
-@group(0) @binding(2) var<storage,read> w: array<u32>;
-@group(0) @binding(3) var<storage,read> scale: array<f32>;
-@group(0) @binding(4) var<storage,read_write> y: array<f32>;
-@group(0) @binding(5) var<storage,read> gateD: array<f32>;
-@group(0) @binding(6) var<storage,read> gateB: array<f32>;
-@group(0) @binding(7) var<storage,read> upD: array<f32>;
-@group(0) @binding(8) var<storage,read> upB: array<f32>;
-@group(0) @binding(9) var<uniform> m0: Meta0;
-@group(0) @binding(10) var<uniform> m1: Meta1;
-
-${hasDP4a ? "" : `
-fn dot4I8Packed(a: u32, b: u32) -> i32 {
-  let va = unpack4xI8(a);
-  let vb = unpack4xI8(b);
-  return va.x * vb.x + va.y * vb.y + va.z * vb.z + va.w * vb.w;
-}
-`}
-
-var<workgroup> partG: array<f32, ${wgSize}>;
-var<workgroup> partU: array<f32, ${wgSize}>;
-@compute @workgroup_size(${wgSize})
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
-  let n = wid.x + wid.y * m0.gridX; let tid = lid.x;
-  if (n >= m0.N) { return; }
-  let K8 = m0.K/8u; let rbG = n*K8; let rbU = (m0.N + n)*K8;
-  let sbG = n*m0.gpr; let sbU = (m0.N + n)*m0.gpr;
-  var accG = 0.0; var accU = 0.0;
-  for (var c = tid; c < K8; c = c + ${wgSize}u) {
-    let wg = w[rbG+c]; let wu = w[rbU+c];
-    let bk = c*8u;
-    let scG = scale[sbG + (bk >> 7u)]; let scU = scale[sbU + (bk >> 7u)];
-    let sc_x = scale_x[bk >> 7u];
-    let wg0 = (i32(wg << 28u) >> 28u) & 0xff;
-    let wg1 = (i32(wg << 24u) >> 28u) & 0xff;
-    let wg2 = (i32(wg << 20u) >> 28u) & 0xff;
-    let wg3 = (i32(wg << 16u) >> 28u) & 0xff;
-    let wg4 = (i32(wg << 12u) >> 28u) & 0xff;
-    let wg5 = (i32(wg << 8u)  >> 28u) & 0xff;
-    let wg6 = (i32(wg << 4u)  >> 28u) & 0xff;
-    let wg7 = (i32(wg)        >> 28u) & 0xff;
-    let pwg0 = u32(wg0 | (wg1 << 8u) | (wg2 << 16u) | (wg3 << 24u));
-    let pwg1 = u32(wg4 | (wg5 << 8u) | (wg6 << 16u) | (wg7 << 24u));
-    let wu0 = (i32(wu << 28u) >> 28u) & 0xff;
-    let wu1 = (i32(wu << 24u) >> 28u) & 0xff;
-    let wu2 = (i32(wu << 20u) >> 28u) & 0xff;
-    let wu3 = (i32(wu << 16u) >> 28u) & 0xff;
-    let wu4 = (i32(wu << 12u) >> 28u) & 0xff;
-    let wu5 = (i32(wu << 8u)  >> 28u) & 0xff;
-    let wu6 = (i32(wu << 4u)  >> 28u) & 0xff;
-    let wu7 = (i32(wu)        >> 28u) & 0xff;
-    let pwu0 = u32(wu0 | (wu1 << 8u) | (wu2 << 16u) | (wu3 << 24u));
-    let pwu1 = u32(wu4 | (wu5 << 8u) | (wu6 << 16u) | (wu7 << 24u));
-    let px0 = x_q[c * 2u];
-    let px1 = x_q[c * 2u + 1u];
-    let sumG = dot4I8Packed(pwg0, px0) + dot4I8Packed(pwg1, px1);
-    let sumU = dot4I8Packed(pwu0, px0) + dot4I8Packed(pwu1, px1);
-    accG = accG + f32(sumG) * scG * sc_x;
-    accU = accU + f32(sumU) * scU * sc_x;
-  }
-  let sg = subgroupAdd(accG); let su = subgroupAdd(accU);
-  if (sgid == 0u) { partG[tid / sgsz] = sg; partU[tid / sgsz] = su; }
-  workgroupBarrier();
-  if (tid == 0u) {
-    let nsg = (${wgSize}u + sgsz - 1u) / sgsz; var gate = 0.0; var up = 0.0;
-    for (var i = 0u; i < nsg; i = i + 1u) { gate = gate + partG[i]; up = up + partU[i]; }
-    if (m0.hasGateLora == 1u) {
-      var dl = 0.0; for (var r = 0u; r < m0.gateRank; r = r + 1u) { dl = dl + gateD[r] * gateB[r*m0.N + n]; }
-      gate = gate + m1.gateScaleLo * dl;
-    }
-    if (m0.hasUpLora == 1u) {
-      var dl = 0.0; for (var r = 0u; r < m0.upRank; r = r + 1u) { dl = dl + upD[r] * upB[r*m0.N + n]; }
-      up = up + m1.upScaleLo * dl;
-    }
-    y[n] = (gate / (1.0 + exp(-gate))) * up;
-  }
-}
-`;
-var GEMM4_W4A8 = (hasDP4a) => `
-enable subgroups;
-${hasDP4a ? "enable packed_4x8_integer_dot_product;" : ""}
-struct Meta { K:u32, N:u32, T:u32, gpr:u32, hasBias:u32, p0:u32, p1:u32, p2:u32 };
-@group(0) @binding(0) var<storage,read> A_q: array<u32>;
-@group(0) @binding(1) var<storage,read> scale_x: array<f32>;
-@group(0) @binding(2) var<storage,read> W: array<u32>;
-@group(0) @binding(3) var<storage,read> scale: array<f32>;
-@group(0) @binding(4) var<storage,read> bias: array<f32>;
-@group(0) @binding(5) var<storage,read_write> Y: array<f32>;
-@group(0) @binding(6) var<uniform> m: Meta;
-
-${hasDP4a ? "" : `
-fn dot4I8Packed(a: u32, b: u32) -> i32 {
-  let va = unpack4xI8(a);
-  let vb = unpack4xI8(b);
-  return va.x * vb.x + va.y * vb.y + va.z * vb.z + va.w * vb.w;
-}
-`}
-
-const BM = 16u; const BN = 64u;
-var<workgroup> As_q: array<u32, 32>;
-var<workgroup> As_scale: array<f32, 16>;
-
-@compute @workgroup_size(64)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let tTile = wid.y * BM; let col = wid.x * BN + lid.x; let valid = col < m.N;
-  let K8 = m.K/8u; let rb = col*K8;
-  var acc: array<f32, 16>;
-  for (var i = 0u; i < BM; i = i + 1u) { acc[i] = 0.0; }
-  let groupsPerRow = m.K / 128u;
-  for (var c = 0u; c < K8; c = c + 1u) {
-    if (lid.x < BM * 2u) {
-      let tt = lid.x / 2u; let trow = tTile + tt; let wordIdx = lid.x % 2u;
-      As_q[lid.x] = select(0u, A_q[trow * (m.K / 4u) + c * 2u + wordIdx], trow < m.T);
-    }
-    if (lid.x < BM) {
-      let trow = tTile + lid.x;
-      As_scale[lid.x] = select(0.0, scale_x[trow * groupsPerRow + ((c * 8u) >> 7u)], trow < m.T);
-    }
-    workgroupBarrier();
-    if (valid) {
-      let word = W[rb + c]; let sc_w = scale[col*m.gpr + ((c*8u) >> 7u)];
-      let w0 = (i32(word << 28u) >> 28u) & 0xff;
-      let w1 = (i32(word << 24u) >> 28u) & 0xff;
-      let w2 = (i32(word << 20u) >> 28u) & 0xff;
-      let w3 = (i32(word << 16u) >> 28u) & 0xff;
-      let w4 = (i32(word << 12u) >> 28u) & 0xff;
-      let w5 = (i32(word << 8u)  >> 28u) & 0xff;
-      let w6 = (i32(word << 4u)  >> 28u) & 0xff;
-      let w7 = (i32(word)        >> 28u) & 0xff;
-      let pw0 = u32(w0 | (w1 << 8u) | (w2 << 16u) | (w3 << 24u));
-      let pw1 = u32(w4 | (w5 << 8u) | (w6 << 16u) | (w7 << 24u));
-      for (var t = 0u; t < BM; t = t + 1u) {
-        let px0 = As_q[t * 2u]; let px1 = As_q[t * 2u + 1u];
-        let sum = dot4I8Packed(pw0, px0) + dot4I8Packed(pw1, px1);
-        acc[t] = acc[t] + f32(sum) * sc_w * As_scale[t];
-      }
-    }
-    workgroupBarrier();
-  }
-  if (valid) {
-    let bv = select(0.0, bias[col], m.hasBias == 1u);
-    for (var t = 0u; t < BM; t = t + 1u) { let trow = tTile + t; if (trow < m.T) { Y[trow*m.N + col] = acc[t] + bv; } }
-  }
-}
-`;
-var GEMM4_ADD_T_W4A8 = (hasDP4a) => `
-enable subgroups;
-${hasDP4a ? "enable packed_4x8_integer_dot_product;" : ""}
-struct Meta { K:u32, N:u32, T:u32, gpr:u32, hasBias:u32, p0:u32, p1:u32, p2:u32 };
-@group(0) @binding(0) var<storage,read> A_q: array<u32>;
-@group(0) @binding(1) var<storage,read> scale_x: array<f32>;
-@group(0) @binding(2) var<storage,read> W: array<u32>;
-@group(0) @binding(3) var<storage,read> scale: array<f32>;
-@group(0) @binding(4) var<storage,read> bias: array<f32>;
-@group(0) @binding(5) var<storage,read_write> Y: array<f32>;
-@group(0) @binding(6) var<uniform> m: Meta;
-
-${hasDP4a ? "" : `
-fn dot4I8Packed(a: u32, b: u32) -> i32 {
-  let va = unpack4xI8(a);
-  let vb = unpack4xI8(b);
-  return va.x * vb.x + va.y * vb.y + va.z * vb.z + va.w * vb.w;
-}
-`}
-
-const BM = 16u; const BN = 64u;
-var<workgroup> As_q: array<u32, 32>;
-var<workgroup> As_scale: array<f32, 16>;
-
-@compute @workgroup_size(64)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let tTile = wid.y * BM; let col = wid.x * BN + lid.x; let valid = col < m.N;
-  let K8 = m.K/8u; let rb = col*K8;
-  var acc: array<f32, 16>;
-  for (var i = 0u; i < BM; i = i + 1u) { acc[i] = 0.0; }
-  let groupsPerRow = m.K / 128u;
-  for (var c = 0u; c < K8; c = c + 1u) {
-    if (lid.x < BM * 2u) {
-      let tt = lid.x / 2u; let trow = tTile + tt; let wordIdx = lid.x % 2u;
-      As_q[lid.x] = select(0u, A_q[trow * (m.K / 4u) + c * 2u + wordIdx], trow < m.T);
-    }
-    if (lid.x < BM) {
-      let trow = tTile + lid.x;
-      As_scale[lid.x] = select(0.0, scale_x[trow * groupsPerRow + ((c * 8u) >> 7u)], trow < m.T);
-    }
-    workgroupBarrier();
-    if (valid) {
-      let word = W[rb + c]; let sc_w = scale[col*m.gpr + ((c*8u) >> 7u)];
-      let w0 = (i32(word << 28u) >> 28u) & 0xff;
-      let w1 = (i32(word << 24u) >> 28u) & 0xff;
-      let w2 = (i32(word << 20u) >> 28u) & 0xff;
-      let w3 = (i32(word << 16u) >> 28u) & 0xff;
-      let w4 = (i32(word << 12u) >> 28u) & 0xff;
-      let w5 = (i32(word << 8u)  >> 28u) & 0xff;
-      let w6 = (i32(word << 4u)  >> 28u) & 0xff;
-      let w7 = (i32(word)        >> 28u) & 0xff;
-      let pw0 = u32(w0 | (w1 << 8u) | (w2 << 16u) | (w3 << 24u));
-      let pw1 = u32(w4 | (w5 << 8u) | (w6 << 16u) | (w7 << 24u));
-      for (var t = 0u; t < BM; t = t + 1u) {
-        let px0 = As_q[t * 2u]; let px1 = As_q[t * 2u + 1u];
-        let sum = dot4I8Packed(pw0, px0) + dot4I8Packed(pw1, px1);
-        acc[t] = acc[t] + f32(sum) * sc_w * As_scale[t];
-      }
-    }
-    workgroupBarrier();
-  }
-  if (valid) {
-    let bv = select(0.0, bias[col], m.hasBias == 1u);
-    for (var t = 0u; t < BM; t = t + 1u) {
-      let trow = tTile + t;
-      if (trow < m.T) { Y[trow*m.N + col] = Y[trow*m.N + col] + acc[t] + bv; }
-    }
-  }
-}
-`;
-var RMSNORM_QKV_ROPE = `
-enable subgroups;
-struct Meta { K:u32, totalN:u32, qN:u32, kN:u32, vN:u32, gpr:u32, pos:u32, eps:f32 };
-@group(0) @binding(0) var<storage,read> x: array<f32>;
-@group(0) @binding(1) var<storage,read> g: array<f32>;
-@group(0) @binding(2) var<storage,read> w: array<u32>;
-@group(0) @binding(3) var<storage,read> scale: array<f32>;
-@group(0) @binding(4) var<storage,read> bias: array<f32>;
-@group(0) @binding(5) var<storage,read> cosT: array<f32>;
-@group(0) @binding(6) var<storage,read> sinT: array<f32>;
-@group(0) @binding(7) var<storage,read_write> qOut: array<f32>;
-@group(0) @binding(8) var<storage,read_write> kOut: array<f32>;
-@group(0) @binding(9) var<storage,read_write> vOut: array<f32>;
-@group(0) @binding(10) var<storage,read_write> normedOut: array<f32>;
-@group(0) @binding(11) var<uniform> m: Meta;
-
-var<workgroup> As: array<f32, 2048>;
-var<workgroup> part: array<f32, 128>;
-var<workgroup> head_out: array<f32, 128>;
-
-@compute @workgroup_size(128)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let tid = lid.x; let K = m.K;
-  var s = 0.0;
-  for (var k = tid; k < K; k = k + 128u) {
-    let val = x[k];
-    s = s + val*val;
-  }
-  part[tid] = s;
-  workgroupBarrier();
-  for (var t = 64u; t > 0u; t = t/2u) {
-    if (tid < t) { part[tid] = part[tid] + part[tid+t]; }
-    workgroupBarrier();
-  }
-  let inv = inverseSqrt(part[0]/f32(K) + m.eps);
-  for (var k = tid; k < K; k = k + 128u) {
-    As[k] = x[k] * inv * g[k];
-    normedOut[k] = As[k];
-  }
-  workgroupBarrier();
-  let head_idx = wid.x;
-  var n = 0u;
-  if (head_idx < 16u) {
-    n = head_idx * 128u + tid;
-  } else if (head_idx < 18u) {
-    n = 2048u + (head_idx - 16u) * 128u + tid;
-  } else {
-    n = 2304u + (head_idx - 18u) * 128u + tid;
-  }
-  let K8 = K / 8u; let rb = n * K8; let sbase = n * m.gpr;
-  var acc = 0.0;
-  for (var c = 0u; c < K8; c = c + 1u) {
-    let word = w[rb + c]; let bk = c * 8u; let sc = scale[sbase + (bk >> 7u)];
-    let w0 = f32(i32(word << 28u) >> 28u);
-    let w1 = f32(i32(word << 24u) >> 28u);
-    let w2 = f32(i32(word << 20u) >> 28u);
-    let w3 = f32(i32(word << 16u) >> 28u);
-    let w4 = f32(i32(word << 12u) >> 28u);
-    let w5 = f32(i32(word << 8u)  >> 28u);
-    let w6 = f32(i32(word << 4u)  >> 28u);
-    let w7 = f32(i32(word)        >> 28u);
-    acc = acc + (
-      As[bk]    * w0 +
-      As[bk+1u] * w1 +
-      As[bk+2u] * w2 +
-      As[bk+3u] * w3 +
-      As[bk+4u] * w4 +
-      As[bk+5u] * w5 +
-      As[bk+6u] * w6 +
-      As[bk+7u] * w7
-    ) * sc;
-  }
-  acc = acc + bias[n];
-  head_out[tid] = acc;
-  workgroupBarrier();
-  if (head_idx < 18u) {
-    let half = 64u;
-    if (tid < half) {
-      let lo = tid; let hi = tid + half; let off = m.pos * 128u + tid;
-      let c = cosT[off]; let s = sinT[off];
-      let xl = head_out[lo]; let xh = head_out[hi];
-      head_out[lo] = xl * c - xh * s; head_out[hi] = xh * c + xl * s;
-    }
-  }
-  workgroupBarrier();
-  if (head_idx < 16u) {
-    qOut[head_idx * 128u + tid] = head_out[tid];
-  } else if (head_idx < 18u) {
-    kOut[(head_idx - 16u) * 128u + tid] = head_out[tid];
-  } else {
-    vOut[(head_idx - 18u) * 128u + tid] = head_out[tid];
-  }
-}
-`;
-var WRITE_KV_PAGE = `
-@group(0) @binding(0) var<storage,read> k_src: array<f32>;
-@group(0) @binding(1) var<storage,read> v_src: array<f32>;
-@group(0) @binding(2) var<storage,read_write> kc: array<f32>;
-@group(0) @binding(3) var<storage,read_write> vc: array<f32>;
-@group(0) @binding(4) var<storage,read> block_table: array<u32>;
-@group(0) @binding(5) var<uniform> m: vec4<u32>; // pos, seq_id, max_blocks, kvd
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let idx = gid.x; let pos = m.x; let seq_id = m.y; let max_blocks = m.z; let kvd = m.w;
-  if (idx >= kvd) { return; }
-  let page_idx = block_table[seq_id * max_blocks + (pos / 16u)];
-  let page_offset = pos % 16u;
-  let physical_pos = page_idx * 16u + page_offset;
-  let dst_offset = physical_pos * kvd + idx;
-  kc[dst_offset] = k_src[idx];
-  vc[dst_offset] = v_src[idx];
-}
-`;
-var WRITE_KV_PAGE_BATCH = `
-struct KVBatchMeta { T:u32, seq_id:u32, max_blocks:u32, kvd:u32, off:u32 };
-@group(0) @binding(0) var<storage,read> k_src: array<f32>;
-@group(0) @binding(1) var<storage,read> v_src: array<f32>;
-@group(0) @binding(2) var<storage,read_write> kc: array<f32>;
-@group(0) @binding(3) var<storage,read_write> vc: array<f32>;
-@group(0) @binding(4) var<storage,read> block_table: array<u32>;
-@group(0) @binding(5) var<uniform> m: KVBatchMeta;
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let idx = gid.x; let T = m.T; let seq_id = m.seq_id; let max_blocks = m.max_blocks; let kvd = m.kvd; let off = m.off;
-  let total = T * kvd; if (idx >= total) { return; }
-  let t = idx / kvd; let d = idx % kvd;
-  let page_idx = block_table[seq_id * max_blocks + ((off + t) / 16u)];
-  let page_offset = (off + t) % 16u;
-  let physical_pos = page_idx * 16u + page_offset;
-  let dst_offset = physical_pos * kvd + d;
-  kc[dst_offset] = k_src[idx];
-  vc[dst_offset] = v_src[idx];
-}
-`;
-var ATTN_PARTIAL_PAGED = `
-enable subgroups;
-@group(0) @binding(0) var<storage,read> q: array<f32>;
-@group(0) @binding(1) var<storage,read> kc: array<f32>;
-@group(0) @binding(2) var<storage,read> vc: array<f32>;
-@group(0) @binding(3) var<storage,read_write> pm: array<f32>;
-@group(0) @binding(4) var<storage,read_write> pz: array<f32>;
-@group(0) @binding(5) var<storage,read_write> po: array<f32>;
-@group(0) @binding(6) var<storage,read> block_table: array<u32>;
-@group(0) @binding(7) var<uniform> m: vec4<u32>;               // nHeads, nKV, ctx, hd
-@group(0) @binding(8) var<uniform> m2: vec4<u32>;              // nsplit, chunk, seq_id, max_blocks
-var<workgroup> sc: array<f32,128>;
-var<workgroup> red: array<f32,32>;
-@compute @workgroup_size(128)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
-  let h = wid.x; let s = wid.y; let tid = lid.x;
-  let nHeads = m.x; let nKV = m.y; let ctx = m.z; let hd = m.w;
-  let nsplit = m2.x; let chunk = m2.y; let seq_id = m2.z; let max_blocks = m2.w;
-  let kvh = h / (nHeads / nKV);
-  let qbase = h*hd; let stride = nKV*hd; let hoff = kvh*hd; let scale = 1.0/sqrt(f32(hd));
-  let nsg = (128u + sgsz - 1u) / sgsz;
-  let t0 = s*chunk; var t1 = t0 + chunk; if (t1 > ctx) { t1 = ctx; }
-  let t = t0 + tid; var sv = -1e30;
-  if (t < t1) {
-    var dot = 0.0;
-    let page_idx = block_table[seq_id * max_blocks + (t / 16u)];
-    let page_offset = t % 16u;
-    let kb = (page_idx * 16u + page_offset) * stride + hoff;
-    for (var d = 0u; d < hd; d = d + 1u) { dot = dot + q[qbase+d]*kc[kb+d]; }
-    sv = dot*scale;
-  }
-  let sgm = subgroupMax(sv); if (sgid == 0u) { red[tid/sgsz] = sgm; }
-  workgroupBarrier();
-  var M = -1e30; for (var i = 0u; i < nsg; i = i + 1u) { M = max(M, red[i]); }
-  workgroupBarrier();
-  var ev = 0.0; if (t < t1) { ev = exp(sv - M); } sc[tid] = ev;
-  let sgs = subgroupAdd(ev); if (sgid == 0u) { red[tid/sgsz] = sgs; }
-  workgroupBarrier();
-  var Z = 0.0; for (var i = 0u; i < nsg; i = i + 1u) { Z = Z + red[i]; }
-  workgroupBarrier();
-  let len = t1 - t0; let pbase = (h*nsplit + s)*hd;
-  for (var d = tid; d < hd; d = d + 128u) {
-    var acc = 0.0;
-    for (var tt = 0u; tt < len; tt = tt + 1u) {
-      let t_curr = t0 + tt;
-      let page_idx = block_table[seq_id * max_blocks + (t_curr / 16u)];
-      let page_offset = t_curr % 16u;
-      let physical_t = page_idx * 16u + page_offset;
-      acc = acc + sc[tt]*vc[physical_t*stride + hoff + d];
-    }
-    po[pbase + d] = acc;
-  }
-  if (tid == 0u) { pm[h*nsplit + s] = M; pz[h*nsplit + s] = Z; }
-}
-`;
-var ATTN_PREFILL_PAGED = `
-enable subgroups;
-@group(0) @binding(0) var<storage,read> q: array<f32>;
-@group(0) @binding(1) var<storage,read> kc: array<f32>;
-@group(0) @binding(2) var<storage,read> vc: array<f32>;
-@group(0) @binding(3) var<storage,read_write> o: array<f32>;
-@group(0) @binding(4) var<storage,read> block_table: array<u32>;
-@group(0) @binding(5) var<uniform> m: vec4<u32>;             // nHeads, nKV, hd, T
-@group(0) @binding(6) var<uniform> m2: vec2<u32>;            // seq_id, max_blocks
-var<workgroup> ps: array<f32,256>;
-var<workgroup> acc: array<f32,128>;
-var<workgroup> red: array<f32,64>;
-@compute @workgroup_size(256)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
-  let h = wid.x; let t = wid.y; let tid = lid.x; let nHeads = m.x; let nKV = m.y; let hd = m.z;
-  let ctx = t + 1u; let kvh = h / (nHeads / nKV);
-  let qbase = t*nHeads*hd + h*hd; let stride = nKV*hd; let hoff = kvh*hd; let scl = 1.0/sqrt(f32(hd));
-  let nsg = (256u + sgsz - 1u) / sgsz;
-  let seq_id = m2.x; let max_blocks = m2.y;
-  for (var d = tid; d < hd; d = d + 256u) { acc[d] = 0.0; }
-  var mrun = -1e30; var lrun = 0.0;
-  let nblk = (ctx + 255u) / 256u;
-  for (var blk = 0u; blk < nblk; blk = blk + 1u) {
-    let kbase = blk*256u; let kk = kbase + tid;
-    var s = -1e30;
-    if (kk < ctx) {
-      var dot = 0.0;
-      let page_idx = block_table[seq_id * max_blocks + (kk / 16u)];
-      let page_offset = kk % 16u;
-      let kb = (page_idx * 16u + page_offset)*stride + hoff;
-      for (var d = 0u; d < hd; d = d + 1u) { dot = dot + q[qbase+d]*kc[kb+d]; }
-      s = dot*scl;
-    }
-    let sgm = subgroupMax(s); if (sgid == 0u) { red[tid/sgsz] = sgm; }
-    workgroupBarrier();
-    var bm = -1e30; for (var i = 0u; i < nsg; i = i + 1u) { bm = max(bm, red[i]); }
-    let mnew = max(mrun, bm); let corr = exp(mrun - mnew);
-    var p = 0.0; if (kk < ctx) { p = exp(s - mnew); }
-    ps[tid] = p;
-    workgroupBarrier();
-    let sgs = subgroupAdd(p); if (sgid == 0u) { red[tid/sgsz] = sgs; }
-    workgroupBarrier();
-    var bs = 0.0; for (var i = 0u; i < nsg; i = i + 1u) { bs = bs + red[i]; }
-    lrun = lrun*corr + bs;
-    let bcount = min(256u, ctx - kbase);
-    for (var d = tid; d < hd; d = d + 256u) {
-      var aa = acc[d]*corr;
-      for (var j = 0u; j < bcount; j = j + 1u) {
-        let t_curr = kbase + j;
-        let page_idx = block_table[seq_id * max_blocks + (t_curr / 16u)];
-        let page_offset = t_curr % 16u;
-        let physical_t = page_idx * 16u + page_offset;
-        aa = aa + ps[j]*vc[physical_t*stride + hoff + d];
-      }
-      acc[d] = aa;
-    }
-    mrun = mnew;
-    workgroupBarrier();
-  }
-  let invL = 1.0/lrun;
-  for (var d = tid; d < hd; d = d + 256u) { o[qbase + d] = acc[d]*invL; }
-}
-`;
-var ATTN_PREFILL_BLOCK_PAGED = `
-enable subgroups;
-struct Meta { nHeads:u32, nKV:u32, hd:u32, T:u32, qStart:u32, ctx:u32, seq_id:u32, max_blocks:u32 };
-@group(0) @binding(0) var<storage,read> q: array<f32>;
-@group(0) @binding(1) var<storage,read> kc: array<f32>;
-@group(0) @binding(2) var<storage,read> vc: array<f32>;
-@group(0) @binding(3) var<storage,read_write> o: array<f32>;
-@group(0) @binding(4) var<storage,read> block_table: array<u32>;
-@group(0) @binding(5) var<uniform> m: Meta;
-const BQ = 4u; const BK = 128u;
-var<workgroup> ps: array<f32, 512>;
-var<workgroup> acc: array<f32, 512>;
-var<workgroup> red: array<f32, 128>;
-@compute @workgroup_size(128)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
-  let h = wid.x; let qBlock = wid.y; let tid = lid.x; let hd = m.hd;
-  let kvh = h / (m.nHeads / m.nKV); let stride = m.nKV * hd; let hoff = kvh * hd;
-  let nsg = (128u + sgsz - 1u) / sgsz; let scl = 1.0 / sqrt(f32(hd));
-  let seq_id = m.seq_id; let max_blocks = m.max_blocks;
-  var mrun: array<f32, 4>; var lrun: array<f32, 4>;
-  for (var r = 0u; r < BQ; r = r + 1u) { mrun[r] = -1e30; lrun[r] = 0.0; }
-  for (var i = tid; i < BQ*hd; i = i + 128u) { acc[i] = 0.0; }
-  workgroupBarrier();
-  let nblk = (m.ctx + BK - 1u) / BK;
-  for (var blk = 0u; blk < nblk; blk = blk + 1u) {
-    let kbase = blk * BK; let kk = kbase + tid;
-    var score: array<f32, 4>;
-    var validQ: array<bool, 4>;
-    var dot: array<f32, 4>;
-    var corrRun: array<f32, 4>;
-    for (var r = 0u; r < BQ; r = r + 1u) {
-      let qt = qBlock * BQ + r; let absQ = m.qStart + qt;
-      validQ[r] = qt < m.T && kk < m.ctx && kk <= absQ;
-      dot[r] = 0.0; score[r] = -1e30;
-    }
-    if (kk < m.ctx) {
-      let page_idx = block_table[seq_id * max_blocks + (kk / 16u)];
-      let page_offset = kk % 16u;
-      let kb = (page_idx * 16u + page_offset)*stride + hoff;
-      for (var d = 0u; d < hd; d = d + 1u) {
-        let kval = kc[kb+d];
-        for (var r = 0u; r < BQ; r = r + 1u) {
-          let qt = qBlock * BQ + r;
-          if (validQ[r]) { dot[r] = dot[r] + q[qt*m.nHeads*hd + h*hd + d] * kval; }
-        }
-      }
-      for (var r = 0u; r < BQ; r = r + 1u) {
-        if (validQ[r]) { score[r] = dot[r] * scl; }
-      }
-    }
-    for (var r = 0u; r < BQ; r = r + 1u) {
-      let s = score[r];
-      let sgm = subgroupMax(s);
-      if (sgid == 0u) { red[r*32u + tid/sgsz] = sgm; }
-      workgroupBarrier();
-      var bm = -1e30; for (var i = 0u; i < nsg; i = i + 1u) { bm = max(bm, red[r*32u+i]); }
-      let mnew = max(mrun[r], bm); let corr = exp(mrun[r] - mnew);
-      corrRun[r] = corr;
-      var p = 0.0; if (validQ[r]) { p = exp(s - mnew); }
-      ps[r*BK + tid] = p;
-      workgroupBarrier();
-      let sgs = subgroupAdd(p);
-      if (sgid == 0u) { red[r*32u + tid/sgsz] = sgs; }
-      workgroupBarrier();
-      var bs = 0.0; for (var i = 0u; i < nsg; i = i + 1u) { bs = bs + red[r*32u+i]; }
-      lrun[r] = lrun[r] * corr + bs;
-      mrun[r] = mnew;
-      workgroupBarrier();
-    }
-    let bcount = min(BK, m.ctx - kbase);
-    for (var d = tid; d < hd; d = d + 128u) {
-      var aa: array<f32, 4>;
-      for (var r = 0u; r < BQ; r = r + 1u) { aa[r] = acc[r*hd+d] * corrRun[r]; }
-      for (var j = 0u; j < bcount; j = j + 1u) {
-        let t_curr = kbase + j;
-        let page_idx = block_table[seq_id * max_blocks + (t_curr / 16u)];
-        let page_offset = t_curr % 16u;
-        let physical_t = page_idx * 16u + page_offset;
-        let vv = vc[physical_t*stride + hoff + d];
-        for (var r = 0u; r < BQ; r = r + 1u) { aa[r] = aa[r] + ps[r*BK+j] * vv; }
-      }
-      for (var r = 0u; r < BQ; r = r + 1u) { acc[r*hd+d] = aa[r]; }
-    }
-    workgroupBarrier();
-  }
-  for (var r = 0u; r < BQ; r = r + 1u) {
-    let qt = qBlock * BQ + r;
-    if (qt < m.T) {
-      let invL = 1.0 / lrun[r]; let ob = qt*m.nHeads*hd + h*hd;
-      for (var d = tid; d < hd; d = d + 128u) { o[ob+d] = acc[r*hd+d] * invL; }
-    }
-  }
-}
-`;
 
 // src/qwgpu/dispatch_plan.js
 function createDispatchPlan(schema) {
@@ -36914,10 +36091,7 @@ var QwenWGPU = class {
       fuseMLP: opts.fuseMLP !== false,
       fuseResidual: opts.fuseResidual !== false,
       prefillAttention,
-      prefillChunkSize: Math.max(0, opts.prefillChunkSize || 0),
-      actQuant: !!opts.actQuant,
-      fuseRMSNormQKVRoPE: opts.fuseRMSNormQKVRoPE !== false,
-      pagedAttention: !!opts.pagedAttention
+      prefillChunkSize: Math.max(0, opts.prefillChunkSize || 0)
     };
   }
   setFeatureFlags(flags = {}) {
@@ -36946,17 +36120,9 @@ var QwenWGPU = class {
     this.pool.resetUniforms();
     this.lastDispatchCount = 0;
   }
-  _pipe(code, name) {
-    const processedCode = typeof code === "string" ? code.replaceAll("WG_SIZE", this.workgroupSize || 64) : code;
-    const m = this.dev.createShaderModule({
-      label: name || void 0,
-      code: processedCode
-    });
-    return this.dev.createComputePipeline({
-      label: name ? `${name}-pipeline` : void 0,
-      layout: "auto",
-      compute: { module: m, entryPoint: "main" }
-    });
+  _pipe(code) {
+    const m = this.dev.createShaderModule({ code });
+    return this.dev.createComputePipeline({ layout: "auto", compute: { module: m, entryPoint: "main" } });
   }
   // `source` is a base URL string OR a reader { range, text } (e.g. hfReader/fileReader).
   async build(source, onProgress = () => {
@@ -36966,68 +36132,34 @@ var QwenWGPU = class {
     this._initRuntimeOptions();
     this.maxCtx = this.opts.maxCtx || 8192;
     this.maxPrefillT = Math.min(this.opts.maxPrefillT || 8192, this.maxCtx);
-    const isAppleSilicon = this.dev.limits.minStorageBufferOffsetAlignment === 4;
-    const isIntelArc = this.dev.limits.minStorageBufferOffsetAlignment === 256;
-    this.workgroupSize = isAppleSilicon || isIntelArc ? 32 : 64;
-    let hasDP4a = false;
-    if (typeof navigator !== "undefined" && navigator.gpu?.wgslLanguageFeatures?.has?.("packed_4x8_integer_dot_product")) {
-      dev.pushErrorScope("validation");
-      try {
-        dev.createShaderModule({
-          code: `enable packed_4x8_integer_dot_product; @compute @workgroup_size(1) fn main() {}`
-        });
-        const error = await dev.popErrorScope();
-        if (!error) {
-          hasDP4a = true;
-        }
-      } catch (e) {
-        await dev.popErrorScope();
-      }
-    }
-    this.hasDP4a = hasDP4a;
-    this.pam = new PagedAttentionManager(this.maxCtx);
     this.pipes = {
-      gemv: this._pipe(GEMV, "gemv"),
-      loraA: this._pipe(LORA_A, "loraA"),
-      loraABatch: this._pipe(LORA_A_BATCH, "loraABatch"),
-      loraBAdd: this._pipe(LORA_B_ADD, "loraBAdd"),
-      loraBAddT: this._pipe(LORA_B_ADD_T, "loraBAddT"),
-      rms: this._pipe(RMSNORM, "rms"),
-      rope: this._pipe(ROPE, "rope"),
-      ropeQK: this._pipe(ROPE_QK, "ropeQK"),
-      attnP: this._pipe(ATTN_PARTIAL, "attnP"),
-      attnC: this._pipe(ATTN_COMBINE, "attnC"),
-      add: this._pipe(ADD, "add"),
-      silu: this._pipe(SILUMUL, "silu"),
-      embed: this._pipe(EMBED, "embed"),
-      embedBuf: this._pipe(EMBED_BUF, "embedBuf"),
-      argmax: this._pipe(ARGMAX, "argmax"),
-      gemv4: this._pipe(GEMV4, "gemv4"),
-      gemv4Add: this._pipe(GEMV4_ADD, "gemv4Add"),
-      qkvGemv4: this._pipe(QKV_GEMV4, "qkvGemv4"),
-      gateUpSiluGemv4: this._pipe(GATE_UP_SILU_GEMV4, "gateUpSiluGemv4"),
-      topkSelect: this._pipe(TOPK_SELECT, "topkSelect"),
-      gemm4: this._pipe(GEMM4, "gemm4"),
-      gemm4AddT: this._pipe(GEMM4_ADD_T, "gemm4AddT"),
-      rmsT: this._pipe(RMSNORM_T, "rmsT"),
-      ropeT: this._pipe(ROPE_T, "ropeT"),
-      embedT: this._pipe(EMBED_T, "embedT"),
-      attnPrefill: this._pipe(ATTN_PREFILL, "attnPrefill"),
-      attnPrefillBlock: this._pipe(ATTN_PREFILL_BLOCK, "attnPrefillBlock"),
-      dynQuant: this._pipe(DYN_QUANT_X, "dynQuant"),
-      dynQuantT: this._pipe(DYN_QUANT_X_T, "dynQuantT"),
-      gemv4W4A8: this._pipe(GEMV4_W4A8(hasDP4a, this.workgroupSize), "gemv4W4A8"),
-      gemv4AddW4A8: this._pipe(GEMV4_ADD_W4A8(hasDP4a, this.workgroupSize), "gemv4AddW4A8"),
-      qkvGemv4W4A8: this._pipe(QKV_GEMV4_W4A8(hasDP4a, this.workgroupSize), "qkvGemv4W4A8"),
-      gateUpSiluGemv4W4A8: this._pipe(GATE_UP_SILU_GEMV4_W4A8(hasDP4a, this.workgroupSize), "gateUpSiluGemv4W4A8"),
-      gemm4W4A8: this._pipe(GEMM4_W4A8(hasDP4a), "gemm4W4A8"),
-      gemm4AddTW4A8: this._pipe(GEMM4_ADD_T_W4A8(hasDP4a), "gemm4AddTW4A8"),
-      rmsNormQkvRope: this._pipe(RMSNORM_QKV_ROPE, "rmsNormQkvRope"),
-      writeKvPage: this._pipe(WRITE_KV_PAGE, "writeKvPage"),
-      writeKvPageBatch: this._pipe(WRITE_KV_PAGE_BATCH, "writeKvPageBatch"),
-      attnPartialPaged: this._pipe(ATTN_PARTIAL_PAGED, "attnPartialPaged"),
-      attnPrefillPaged: this._pipe(ATTN_PREFILL_PAGED, "attnPrefillPaged"),
-      attnPrefillBlockPaged: this._pipe(ATTN_PREFILL_BLOCK_PAGED, "attnPrefillBlockPaged")
+      gemv: this._pipe(GEMV),
+      loraA: this._pipe(LORA_A),
+      loraABatch: this._pipe(LORA_A_BATCH),
+      loraBAdd: this._pipe(LORA_B_ADD),
+      loraBAddT: this._pipe(LORA_B_ADD_T),
+      rms: this._pipe(RMSNORM),
+      rope: this._pipe(ROPE),
+      ropeQK: this._pipe(ROPE_QK),
+      attnP: this._pipe(ATTN_PARTIAL),
+      attnC: this._pipe(ATTN_COMBINE),
+      add: this._pipe(ADD),
+      silu: this._pipe(SILUMUL),
+      embed: this._pipe(EMBED),
+      embedBuf: this._pipe(EMBED_BUF),
+      argmax: this._pipe(ARGMAX),
+      gemv4: this._pipe(GEMV4),
+      gemv4Add: this._pipe(GEMV4_ADD),
+      qkvGemv4: this._pipe(QKV_GEMV4),
+      gateUpSiluGemv4: this._pipe(GATE_UP_SILU_GEMV4),
+      topkSelect: this._pipe(TOPK_SELECT),
+      gemm4: this._pipe(GEMM4),
+      gemm4AddT: this._pipe(GEMM4_ADD_T),
+      rmsT: this._pipe(RMSNORM_T),
+      ropeT: this._pipe(ROPE_T),
+      embedT: this._pipe(EMBED_T),
+      attnPrefill: this._pipe(ATTN_PREFILL),
+      attnPrefillBlock: this._pipe(ATTN_PREFILL_BLOCK)
     };
     onProgress("streaming + quantizing weights", 0);
     this.schema = createQwenSchema(c);
@@ -37082,10 +36214,7 @@ var QwenWGPU = class {
       po: this._buf(c.numHeads * NSPLITMAX * c.headDim * 4),
       idsBuf: this._buf(this.decodeBatchCapacity * 4),
       sampleIds: this._buf(this.maxSamplingTopK * 4),
-      sampleVals: this._buf(this.maxSamplingTopK * 4),
-      x_q: this._buf(Math.max(qd, I) * 4),
-      scale_x: this._buf(256 * 4),
-      blockTableBuf: this._buf(this.pam.maxBlocksPerSeq * 4, STORAGE | GPUBufferUsage.COPY_DST)
+      sampleVals: this._buf(this.maxSamplingTopK * 4)
     };
     this.idsRead = this._buf(this.decodeBatchCapacity * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
     this.argmaxRead = this._buf(4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
@@ -37112,6 +36241,8 @@ var QwenWGPU = class {
     this.decodeBatchWarmupTokens = Math.max(0, Math.floor(Number(opts.decodeBatchWarmupTokens ?? 4)));
     this.decodeBatchWarmupSize = Math.min(this.decodeBatchCapacity, Math.max(1, Math.floor(Number(opts.decodeBatchWarmupSize ?? 4))));
     this.decodeBatchMaxLatencyMs = Number(opts.decodeBatchMaxLatencyMs ?? 250);
+    this.decodeBatchAutotuneCtx = Math.max(1, Math.floor(Number(opts.decodeBatchAutotuneCtx ?? 128)));
+    this.decodeBatchMinTokPerSec = Number(opts.decodeBatchMinTokPerSec ?? 20);
     this.samplingTopK = Math.max(1, Math.floor(Number(opts.samplingTopK ?? 40)));
     this.maxSamplingTopK = Math.max(this.samplingTopK, Math.floor(Number(opts.maxSamplingTopK ?? 64)));
     this.decodeBatchTuning = { selected: this.MAXBATCH, candidates: [], reason: this.decodeBatchMode === "auto" ? "pending" : "fixed" };
@@ -37140,8 +36271,8 @@ var QwenWGPU = class {
     rmsDv.setFloat32(4, c.rmsNormEps, true);
     this.u = {
       rmsHidden: this._staticUni(`rms:${c.hiddenSize}:${c.rmsNormEps}`, new Uint8Array(rms)),
-      addHidden: this._staticUni(`u32:${c.hiddenSize}`, new Uint32Array([c.hiddenSize])),
-      siluIntermediate: this._staticUni(`u32:${c.intermediateSize}`, new Uint32Array([c.intermediateSize])),
+      addHidden: this._staticUni(`u32:${c.hiddenSize / 4}`, new Uint32Array([c.hiddenSize / 4])),
+      siluIntermediate: this._staticUni(`u32:${c.intermediateSize / 4}`, new Uint32Array([c.intermediateSize / 4])),
       embedBuf: this._staticUni(`embedBuf:${c.hiddenSize}`, new Uint32Array([c.hiddenSize])),
       argmax: this._staticUni(`argmax:${c.vocabSize}`, new Uint32Array([c.vocabSize]))
     };
@@ -37330,36 +36461,54 @@ var QwenWGPU = class {
     this.dev.queue.writeBuffer(S.amax, 0, new Uint32Array([seedTokenId]));
     if (this.dev.queue.onSubmittedWorkDone) await this.dev.queue.onSubmittedWorkDone();
   }
+  async _prepareAutotuneDecodeContext(ctx) {
+    ctx = Math.min(Math.max(1, Math.floor(ctx)), this.maxCtx - 1);
+    await this._resetAutotuneDecodeState(ctx, 0);
+    for (let p = 0; p < ctx; p++) this.token(0, p);
+    if (this.dev.queue.onSubmittedWorkDone) await this.dev.queue.onSubmittedWorkDone();
+    this.dev.queue.writeBuffer(this.s.amax, 0, new Uint32Array([0]));
+    return ctx;
+  }
+  _pickAutotuneBatch(rows, minTokPerSec) {
+    if (!rows.length) return this.MAXBATCH;
+    const floor2 = Number.isFinite(minTokPerSec) ? minTokPerSec : 0;
+    const eligible = floor2 > 0 ? rows.filter((r) => r.tokPerSec >= floor2) : rows;
+    const pool = eligible.length ? eligible : rows;
+    return pool.reduce(
+      (best, row) => row.tokPerSec > best.tokPerSec + 0.05 ? row : row.tokPerSec < best.tokPerSec - 0.05 ? best : row.k > best.k ? row : best
+    ).k;
+  }
   async autotuneDecodeBatch() {
     const candidates = [...new Set(this.decodeBatchCandidates)].filter((k2) => k2 >= 1 && k2 <= this.decodeBatchCapacity && k2 <= this.maxCtx).sort((a, b) => a - b);
+    const ctx = Math.min(this.decodeBatchAutotuneCtx, this.maxCtx - 1);
+    const minTokPerSec = this.decodeBatchMinTokPerSec;
     const rows = [];
-    const resetTokens = candidates.length ? Math.max(...candidates) : 0;
-    let selected = candidates[0] ?? this.MAXBATCH, best = Infinity;
+    let selected = candidates[candidates.length - 1] ?? this.MAXBATCH;
     try {
       for (const k2 of candidates) {
-        await this._resetAutotuneDecodeState(resetTokens);
+        await this._prepareAutotuneDecodeContext(ctx);
         const t0 = performance.now();
-        await this.decodeGreedyBatch(0, k2);
+        await this.decodeGreedyBatch(ctx, k2);
         const ms2 = performance.now() - t0;
         const msPerToken = ms2 / k2;
-        rows.push({ k: k2, ms: ms2, msPerToken });
-        const latencyOk = !Number.isFinite(this.decodeBatchMaxLatencyMs) || ms2 <= this.decodeBatchMaxLatencyMs;
-        if (latencyOk && msPerToken < best) {
-          best = msPerToken;
-          selected = k2;
-        }
+        const tokPerSec = k2 / (ms2 / 1e3);
+        rows.push({ k: k2, ms: ms2, msPerToken, tokPerSec, ctx });
       }
-      if (!rows.some((r) => r.k === selected) && rows.length) selected = rows.reduce((a, b) => a.msPerToken <= b.msPerToken ? a : b).k;
+      selected = this._pickAutotuneBatch(rows, minTokPerSec);
       this.MAXBATCH = selected;
-      this.decodeBatchTuning = { selected, candidates: rows, reason: "auto wall-clock decodeGreedyBatch with reset state" };
+      this.decodeBatchTuning = {
+        selected,
+        candidates: rows,
+        ctx,
+        minTokPerSec,
+        reason: `auto steady-state decode at ctx=${ctx}, floor=${minTokPerSec} tok/s`
+      };
     } catch (e) {
       this.decodeBatchTuning = { selected: this.MAXBATCH, candidates: rows, reason: `auto failed: ${e.message}` };
     } finally {
-      if (resetTokens > 0) {
-        try {
-          await this._resetAutotuneDecodeState(resetTokens);
-        } catch {
-        }
+      try {
+        await this._resetAutotuneDecodeState(0);
+      } catch {
       }
     }
     return this.decodeBatchTuning;
@@ -37379,33 +36528,18 @@ var QwenWGPU = class {
   }
   gemv4(enc, xBuf, q, yBuf, biasBuf, moduleKey) {
     const mod = this.lora?.modules?.[moduleKey];
-    if (this.debugCapture) console.log("VWG gemv4: " + moduleKey + " mod=" + !!mod);
     if (mod) {
       const uA = this._staticUni(`loraA:${this._loraEpoch}:${q.K}:${mod.rank}`, new Uint32Array([q.K, mod.rank]));
       this._dispatch(enc, this.pipes.loraA, this._bgCached(this.pipes.loraA, [xBuf, mod.A, this.s.loraD, uA], `loraA:${moduleKey}:${this._loraEpoch}`, { sensitive: true }), mod.rank, 1, "loraA");
-      if (this.debugCapture && moduleKey === "layers.0.self_attn.q_proj" && this.debugStep < this.debugT) {
-        enc.copyBufferToBuffer(xBuf, 0, this.debugBufs.xSeq, this.debugStep * q.K * 4, q.K * 4);
-        enc.copyBufferToBuffer(this.s.loraD, 0, this.debugBufs.dSeq, this.debugStep * mod.rank * 4, mod.rank * 4);
-      }
     }
     const meta = this._gemv4Meta(q, biasBuf, mod);
     const key = `gemv4:${moduleKey || "base"}:${q.K}:${q.N}:${q.gpr}:${biasBuf ? 1 : 0}:${mod ? this._loraEpoch : 0}`;
     const bg = this._bgCached(this.pipes.gemv4, [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf, meta.buf], key, { sensitive: !!mod });
     this._dispatch(enc, this.pipes.gemv4, bg, meta.gx, meta.gy, `g4:${q.N}x${q.K}`);
-    if (mod) {
-      if (this.debugCapture && moduleKey === "layers.0.self_attn.q_proj" && this.debugStep < this.debugT) {
-        enc.copyBufferToBuffer(yBuf, 0, this.debugBufs.ySeq, this.debugStep * q.N * 4, q.N * 4);
-        this.debugStep++;
-      }
-    }
   }
   _loraA(enc, xBuf, q, mod, dBuf, moduleKey, label = "loraA") {
     const uA = this._staticUni(`loraA:${this._loraEpoch}:${q.K}:${mod.rank}`, new Uint32Array([q.K, mod.rank]));
     this._dispatch(enc, this.pipes.loraA, this._bgCached(this.pipes.loraA, [xBuf, mod.A, dBuf, uA], `${label}:${moduleKey}:${this._loraEpoch}`, { sensitive: true }), mod.rank, 1, label);
-    if (this.debugCapture && moduleKey === "layers.0.self_attn.q_proj" && this.debugStep < this.debugT) {
-      enc.copyBufferToBuffer(xBuf, 0, this.debugBufs.xSeq, this.debugStep * q.K * 4, q.K * 4);
-      enc.copyBufferToBuffer(dBuf, 0, this.debugBufs.dSeq, this.debugStep * mod.rank * 4, mod.rank * 4);
-    }
   }
   _loraBAdd(enc, yBuf, q, mod, dBuf, moduleKey) {
     const meta = new ArrayBuffer(32);
@@ -37414,11 +36548,7 @@ var QwenWGPU = class {
     dv.setUint32(4, mod.rank, true);
     dv.setFloat32(16, mod.scale, true);
     const bg = this._bgCached(this.pipes.loraBAdd, [dBuf, mod.B, yBuf, this._uni(new Uint8Array(meta))], `loraBAdd:${moduleKey}:${this._loraEpoch}`, { sensitive: true });
-    this._dispatch(enc, this.pipes.loraBAdd, bg, Math.ceil(q.N / 256), 1, "loraB");
-    if (this.debugCapture && moduleKey === "layers.0.self_attn.q_proj" && this.debugStep < this.debugT) {
-      enc.copyBufferToBuffer(yBuf, 0, this.debugBufs.ySeq, this.debugStep * q.N * 4, q.N * 4);
-      this.debugStep++;
-    }
+    this._dispatch(enc, this.pipes.loraBAdd, bg, Math.ceil(q.N / 1024), 1, "loraB");
   }
   gemv4Add(enc, xBuf, q, yBuf, biasBuf, moduleKey) {
     const mod = this.lora?.modules?.[moduleKey];
@@ -37427,161 +36557,6 @@ var QwenWGPU = class {
     const key = `gemv4add:${moduleKey || "base"}:${q.K}:${q.N}:${q.gpr}:${biasBuf ? 1 : 0}:${mod ? this._loraEpoch : 0}`;
     const bg = this._bgCached(this.pipes.gemv4Add, [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf, meta.buf], key, { sensitive: !!mod });
     this._dispatch(enc, this.pipes.gemv4Add, bg, meta.gx, meta.gy, `g4add:${q.N}x${q.K}`);
-  }
-  dynQuant(enc, xBuf, x_qBuf, scale_xBuf, K2) {
-    const numGroups = Math.ceil(K2 / 128);
-    const u = this._uni(new Uint32Array([K2]));
-    const bg = this._bg(this.pipes.dynQuant, [xBuf, x_qBuf, scale_xBuf, u]);
-    this._dispatch(enc, this.pipes.dynQuant, bg, numGroups, 1, "dynQuant");
-  }
-  dynQuantT(enc, xBuf, x_qBuf, scale_xBuf, K2, T) {
-    const numGroups = Math.ceil(K2 / 128);
-    const u = this._uni(new Uint32Array([K2, T]));
-    const bg = this._bg(this.pipes.dynQuantT, [xBuf, x_qBuf, scale_xBuf, u]);
-    this._dispatch(enc, this.pipes.dynQuantT, bg, numGroups, T, "dynQuantT");
-  }
-  gemv4W4A8(enc, xBuf, x_qBuf, scale_xBuf, q, yBuf, biasBuf, moduleKey) {
-    const mod = this.lora?.modules?.[moduleKey];
-    if (mod) {
-      const uA = this._staticUni(`loraA:${this._loraEpoch}:${q.K}:${mod.rank}`, new Uint32Array([q.K, mod.rank]));
-      this._dispatch(enc, this.pipes.loraA, this._bgCached(this.pipes.loraA, [xBuf, mod.A, this.s.loraD, uA], `loraA:${moduleKey}:${this._loraEpoch}`, { sensitive: true }), mod.rank, 1, "loraA");
-    }
-    const meta = this._gemv4Meta(q, biasBuf, mod);
-    const key = `gemv4_w4a8:${moduleKey || "base"}:${q.K}:${q.N}:${q.gpr}:${biasBuf ? 1 : 0}:${mod ? this._loraEpoch : 0}`;
-    const bg = this._bgCached(this.pipes.gemv4W4A8, [x_qBuf, scale_xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf, meta.buf], key, { sensitive: !!mod });
-    this._dispatch(enc, this.pipes.gemv4W4A8, bg, meta.gx, meta.gy, `g4w4a8:${q.N}x${q.K}`);
-  }
-  gemv4AddW4A8(enc, xBuf, x_qBuf, scale_xBuf, q, yBuf, biasBuf, moduleKey) {
-    const mod = this.lora?.modules?.[moduleKey];
-    if (mod) this._loraA(enc, xBuf, q, mod, this.s.loraD, moduleKey);
-    const meta = this._gemv4Meta(q, biasBuf, mod);
-    const key = `gemv4add_w4a8:${moduleKey || "base"}:${q.K}:${q.N}:${q.gpr}:${biasBuf ? 1 : 0}:${mod ? this._loraEpoch : 0}`;
-    const bg = this._bgCached(this.pipes.gemv4AddW4A8, [x_qBuf, scale_xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf, meta.buf], key, { sensitive: !!mod });
-    this._dispatch(enc, this.pipes.gemv4AddW4A8, bg, meta.gx, meta.gy, `g4addw4a8:${q.N}x${q.K}`);
-  }
-  qkvGemv4W4A8(enc, xBuf, x_qBuf, scale_xBuf, packed, qBuf, kBuf, vBuf, L) {
-    const gx = Math.min(packed.totalN, 65535);
-    const meta = this._staticUni(`qkv:${packed.K}:${packed.totalN}:${packed.qN}:${packed.kN}:${packed.vN}:${packed.gpr}`, new Uint32Array([packed.K, packed.totalN, packed.qN, packed.kN, packed.vN, packed.gpr, gx, 0]));
-    const bg = this._bgCached(this.pipes.qkvGemv4W4A8, [x_qBuf, scale_xBuf, packed.w, packed.scale, packed.bias, qBuf, kBuf, vBuf, meta], `qkv_w4a8:${L.index}`, { sensitive: false });
-    this._dispatch(enc, this.pipes.qkvGemv4W4A8, bg, gx, Math.ceil(packed.totalN / gx), `qkvw4a8:${packed.totalN}x${packed.K}`);
-    for (const [part, out] of [[L.q, qBuf], [L.k, kBuf], [L.v, vBuf]]) {
-      const mod = this.lora?.modules?.[part.loraKey];
-      if (!mod) continue;
-      const q = this.q4[part.weight];
-      this._loraA(enc, xBuf, q, mod, this.s.loraD, part.loraKey);
-      this._loraBAdd(enc, out, q, mod, this.s.loraD, part.loraKey);
-    }
-  }
-  gateUpSiluGemv4W4A8(enc, xBuf, x_qBuf, scale_xBuf, packed, yBuf, L) {
-    const gate = this.q4[L.gate.weight], up = this.q4[L.up.weight];
-    const gateMod = this.lora?.modules?.[L.gate.loraKey];
-    const upMod = this.lora?.modules?.[L.up.loraKey];
-    if (gateMod) this._loraA(enc, xBuf, gate, gateMod, this.s.loraD, L.gate.loraKey, "loraA:gate");
-    if (upMod) this._loraA(enc, xBuf, up, upMod, this.s.loraD2, L.up.loraKey, "loraA:up");
-    const gx = Math.min(packed.N, 65535);
-    const m0 = this._staticUni(`gu0:${this._loraEpoch}:${packed.K}:${packed.N}:${packed.gpr}:${gateMod ? gateMod.rank : 0}:${upMod ? upMod.rank : 0}:${gateMod ? 1 : 0}:${upMod ? 1 : 0}`, new Uint32Array([packed.K, packed.N, packed.gpr, gx, gateMod ? gateMod.rank : 0, upMod ? upMod.rank : 0, gateMod ? 1 : 0, upMod ? 1 : 0]));
-    const m1 = this._staticUni(`gu1:${this._loraEpoch}:${gateMod ? gateMod.scale : 0}:${upMod ? upMod.scale : 0}`, new Float32Array([gateMod ? gateMod.scale : 0, upMod ? upMod.scale : 0, 0, 0]));
-    const bg = this._bgCached(this.pipes.gateUpSiluGemv4W4A8, [x_qBuf, scale_xBuf, packed.w, packed.scale, yBuf, this.s.loraD, gateMod ? gateMod.B : this.s.dummy, this.s.loraD2, upMod ? upMod.B : this.s.dummy, m0, m1], `gu_w4a8:${L.index}:${this._loraEpoch}:${gateMod ? 1 : 0}:${upMod ? 1 : 0}`, { sensitive: !!(gateMod || upMod) });
-    this._dispatch(enc, this.pipes.gateUpSiluGemv4W4A8, bg, gx, Math.ceil(packed.N / gx), `guw4a8:${packed.N}x${packed.K}`);
-  }
-  gemm4W4A8(enc, aBuf, a_qBuf, scale_xBuf, q, yBuf, T, biasBuf, moduleKey) {
-    const meta = this._uni(new Uint32Array([q.K, q.N, T, q.gpr, biasBuf ? 1 : 0, 0, 0, 0]));
-    const bg = this._bg(this.pipes.gemm4W4A8, [a_qBuf, scale_xBuf, q.w, q.scale, biasBuf || this.s.dummy, yBuf, meta]);
-    this._dispatch(enc, this.pipes.gemm4W4A8, bg, Math.ceil(q.N / 64), Math.ceil(T / 16), "gemm4W4A8");
-    const mod = this.lora?.modules?.[moduleKey];
-    if (mod) this.loraBatchDelta(enc, aBuf, yBuf, q, T, mod, moduleKey);
-  }
-  gemm4AddTW4A8(enc, aBuf, a_qBuf, scale_xBuf, q, yBuf, T, biasBuf, moduleKey) {
-    const meta = new Uint32Array([q.K, q.N, T, q.gpr, biasBuf ? 1 : 0, 0, 0, 0]);
-    const bg = this._bg(this.pipes.gemm4AddTW4A8, [a_qBuf, scale_xBuf, q.w, q.scale, biasBuf || this.s.dummy, yBuf, this._uni(meta)]);
-    this._dispatch(enc, this.pipes.gemm4AddTW4A8, bg, Math.ceil(q.N / 64), Math.ceil(T / 16), "gemm4AddTW4A8");
-    const mod = this.lora?.modules?.[moduleKey];
-    if (mod) this.loraBatchDelta(enc, aBuf, yBuf, q, T, mod, moduleKey);
-  }
-  rmsNormQkvRope(enc, xBuf, layerIndex, pos) {
-    const c = this.cfg, L = this.plan.layers[layerIndex];
-    const packed = this.qkv[L.index];
-    const meta = this._uni(new Uint32Array([
-      packed.K,
-      packed.totalN,
-      packed.qN,
-      packed.kN,
-      packed.vN,
-      packed.gpr,
-      pos,
-      0
-    ]));
-    const floatMeta = new Float32Array(meta.buffer);
-    floatMeta[7] = c.rmsNormEps;
-    const bg = this._bgCached(this.pipes.rmsNormQkvRope, [
-      xBuf,
-      this.bufs[L.inputNorm],
-      packed.w,
-      packed.scale,
-      packed.bias,
-      this.ropeCos,
-      this.ropeSin,
-      this.s.q,
-      this.s.k,
-      this.s.v,
-      this.s.normed,
-      meta
-    ], `rmsNormQkvRope:${layerIndex}`, { sensitive: false });
-    this._dispatch(enc, this.pipes.rmsNormQkvRope, bg, 20, 1, "rmsNormQkvRope");
-    for (const [part, out] of [[L.q, this.s.q], [L.k, this.s.k], [L.v, this.s.v]]) {
-      const mod = this.lora?.modules?.[part.loraKey];
-      if (!mod) continue;
-      const q = this.q4[part.weight];
-      this._loraA(enc, this.s.normed, q, mod, this.s.loraD, part.loraKey);
-      this._loraBAdd(enc, out, q, mod, this.s.loraD, part.loraKey);
-    }
-  }
-  writeKvPage(enc, kBuf, vBuf, kcBuf, vcBuf, pos, layerIndex) {
-    const c = this.cfg;
-    const kvd = c.numKVHeads * c.headDim;
-    this.pam.ensureBlocks(0, pos + 1);
-    const btArr = this.pam.getBlockTableArray(0);
-    this.dev.queue.writeBuffer(this.s.blockTableBuf, 0, btArr);
-    const meta = this._uni(new Uint32Array([pos, 0, this.pam.maxBlocksPerSeq, kvd]));
-    const bg = this._bg(this.pipes.writeKvPage, [kBuf, vBuf, kcBuf, vcBuf, this.s.blockTableBuf, meta]);
-    this._dispatch(enc, this.pipes.writeKvPage, bg, Math.ceil(kvd / 256), 1, "writeKvPage");
-  }
-  writeKvPageBatch(enc, kBuf, vBuf, kcBuf, vcBuf, T, off, layerIndex) {
-    const c = this.cfg;
-    const kvd = c.numKVHeads * c.headDim;
-    this.pam.ensureBlocks(0, off + T);
-    const btArr = this.pam.getBlockTableArray(0);
-    this.dev.queue.writeBuffer(this.s.blockTableBuf, 0, btArr);
-    const meta = this._uni(new Uint32Array([T, 0, this.pam.maxBlocksPerSeq, kvd, off]));
-    const bg = this._bg(this.pipes.writeKvPageBatch, [kBuf, vBuf, kcBuf, vcBuf, this.s.blockTableBuf, meta]);
-    this._dispatch(enc, this.pipes.writeKvPageBatch, bg, Math.ceil(T * kvd / 256), 1, "writeKvPageBatch");
-  }
-  attnPaged(enc, qBuf, kc, vc, oBuf, ctx) {
-    const c = this.cfg, S = this.s;
-    const nsplit = Math.ceil(ctx / this.CHUNK);
-    const bgP = this._bg(this.pipes.attnPartialPaged, [
-      qBuf,
-      kc,
-      vc,
-      S.pm,
-      S.pz,
-      S.po,
-      S.blockTableBuf,
-      this._uni(new Uint32Array([c.numHeads, c.numKVHeads, ctx, c.headDim])),
-      this._uni(new Uint32Array([nsplit, this.CHUNK, 0, this.pam.maxBlocksPerSeq]))
-    ]);
-    this._dispatch(enc, this.pipes.attnPartialPaged, bgP, c.numHeads, nsplit, "attnP_paged");
-    const bgC = this._bg(this.pipes.attnC, [S.pm, S.pz, S.po, oBuf, this._uni(new Uint32Array([c.numHeads, c.headDim, nsplit, 0]))]);
-    this._dispatch(enc, this.pipes.attnC, bgC, c.numHeads, 1, "attnC");
-  }
-  attnPrefillPaged(enc, qBuf, kc, vc, oBuf, T, qStart = 0, ctx = T) {
-    const c = this.cfg;
-    if (this.features.prefillAttention === "block" || qStart !== 0 || ctx !== T) {
-      const meta = new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, T, qStart, ctx, 0, this.pam.maxBlocksPerSeq]);
-      this._dispatch(enc, this.pipes.attnPrefillBlockPaged, this._bg(this.pipes.attnPrefillBlockPaged, [qBuf, kc, vc, oBuf, this.s.blockTableBuf, this._uni(meta)]), c.numHeads, Math.ceil(T / 4), "attnPrefillBlockPaged");
-    } else {
-      this._dispatch(enc, this.pipes.attnPrefillPaged, this._bg(this.pipes.attnPrefillPaged, [qBuf, kc, vc, oBuf, this.s.blockTableBuf, this._uni(new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, T])), this._uni(new Uint32Array([0, this.pam.maxBlocksPerSeq]))]), c.numHeads, T, "attnPrefillPaged");
-    }
   }
   qkvGemv4(enc, xBuf, packed, qBuf, kBuf, vBuf, L) {
     const gx = Math.min(packed.totalN, 65535);
@@ -37620,11 +36595,11 @@ var QwenWGPU = class {
     this._dispatch(enc, this.pipes.rms, this._bgCached(this.pipes.rms, [xBuf, gBuf, yBuf, u], `rms:${K2}`), 1, 1, "rms");
   }
   rope(enc, xBuf, pos, nHeads) {
-    this._dispatch(enc, this.pipes.rope, this._bg(this.pipes.rope, [xBuf, this.ropeCos, this.ropeSin, this._uni(new Uint32Array([nHeads, this.cfg.headDim, pos]))]), Math.ceil(nHeads * (this.cfg.headDim / 2) / 256), 1, "rope");
+    this._dispatch(enc, this.pipes.rope, this._bg(this.pipes.rope, [xBuf, this.ropeCos, this.ropeSin, this._uni(new Uint32Array([nHeads, this.cfg.headDim, pos]))]), Math.ceil(nHeads * (this.cfg.headDim / 8) / 256), 1, "rope");
   }
   ropeQK(enc, qBuf, kBuf, pos) {
     const c = this.cfg;
-    const pairs = (c.numHeads + c.numKVHeads) * (c.headDim / 2);
+    const pairs = (c.numHeads + c.numKVHeads) * (c.headDim / 8);
     this._dispatch(enc, this.pipes.ropeQK, this._bg(this.pipes.ropeQK, [qBuf, kBuf, this.ropeCos, this.ropeSin, this._uni(new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, pos]))]), Math.ceil(pairs / 256), 1, "ropeQK");
   }
   attn(enc, qBuf, kc, vc, oBuf, ctx) {
@@ -37649,81 +36624,39 @@ var QwenWGPU = class {
     const c = this.cfg, S = this.s, hd = c.headDim, kvd = c.numKVHeads * hd;
     for (let i = 0; i < c.numLayers; i++) {
       const L = this.plan.layers[i];
-      if (this.features.fuseRMSNormQKVRoPE) {
-        this.rmsNormQkvRope(enc, S.hidden, i, pos);
+      this.rms(enc, S.hidden, this.bufs[L.inputNorm], S.normed, c.hiddenSize);
+      if (this.features.fuseQKV) {
+        this.qkvGemv4(enc, S.normed, this.qkv[L.index], S.q, S.k, S.v, L);
       } else {
-        this.rms(enc, S.hidden, this.bufs[L.inputNorm], S.normed, c.hiddenSize);
-        if (this.features.actQuant) {
-          this.dynQuant(enc, S.normed, S.x_q, S.scale_x, c.hiddenSize);
-          this.qkvGemv4W4A8(enc, S.normed, S.x_q, S.scale_x, this.qkv[L.index], S.q, S.k, S.v, L);
-        } else {
-          if (this.features.fuseQKV) {
-            this.qkvGemv4(enc, S.normed, this.qkv[L.index], S.q, S.k, S.v, L);
-          } else {
-            this.gemv4(enc, S.normed, this.q4[L.q.weight], S.q, this.bufs[L.q.bias], L.q.loraKey);
-            this.gemv4(enc, S.normed, this.q4[L.k.weight], S.k, this.bufs[L.k.bias], L.k.loraKey);
-            this.gemv4(enc, S.normed, this.q4[L.v.weight], S.v, this.bufs[L.v.bias], L.v.loraKey);
-          }
-        }
-        if (this.features.fuseRoPE) this.ropeQK(enc, S.q, S.k, pos);
-        else {
-          this.rope(enc, S.q, pos, c.numHeads);
-          this.rope(enc, S.k, pos, c.numKVHeads);
-        }
+        this.gemv4(enc, S.normed, this.q4[L.q.weight], S.q, this.bufs[L.q.bias], L.q.loraKey);
+        this.gemv4(enc, S.normed, this.q4[L.k.weight], S.k, this.bufs[L.k.bias], L.k.loraKey);
+        this.gemv4(enc, S.normed, this.q4[L.v.weight], S.v, this.bufs[L.v.bias], L.v.loraKey);
       }
-      if (this.features.pagedAttention) {
-        this.writeKvPage(enc, S.k, S.v, this.kc[i], this.vc[i], pos, i);
-      } else {
-        enc.copyBufferToBuffer(S.k, 0, this.kc[i], pos * kvd * 4, kvd * 4);
-        enc.copyBufferToBuffer(S.v, 0, this.vc[i], pos * kvd * 4, kvd * 4);
+      if (this.features.fuseRoPE) this.ropeQK(enc, S.q, S.k, pos);
+      else {
+        this.rope(enc, S.q, pos, c.numHeads);
+        this.rope(enc, S.k, pos, c.numKVHeads);
       }
-      if (this.features.pagedAttention) {
-        this.attnPaged(enc, S.q, this.kc[i], this.vc[i], S.attn, pos + 1);
-      } else {
-        this.attn(enc, S.q, this.kc[i], this.vc[i], S.attn, pos + 1);
-      }
-      if (this.features.actQuant) {
-        this.dynQuant(enc, S.attn, S.x_q, S.scale_x, c.hiddenSize);
-        if (this.features.fuseResidual) {
-          this.gemv4AddW4A8(enc, S.attn, S.x_q, S.scale_x, this.q4[L.o.weight], S.hidden, null, L.o.loraKey);
-        } else {
-          this.gemv4W4A8(enc, S.attn, S.x_q, S.scale_x, this.q4[L.o.weight], S.tmp, null, L.o.loraKey);
-          this._addInto(enc, S.hidden, S.tmp, c.hiddenSize);
-        }
-      } else {
-        if (this.features.fuseResidual) this.gemv4Add(enc, S.attn, this.q4[L.o.weight], S.hidden, null, L.o.loraKey);
-        else {
-          this.gemv4(enc, S.attn, this.q4[L.o.weight], S.tmp, null, L.o.loraKey);
-          this._addInto(enc, S.hidden, S.tmp, c.hiddenSize);
-        }
+      enc.copyBufferToBuffer(S.k, 0, this.kc[i], pos * kvd * 4, kvd * 4);
+      enc.copyBufferToBuffer(S.v, 0, this.vc[i], pos * kvd * 4, kvd * 4);
+      this.attn(enc, S.q, this.kc[i], this.vc[i], S.attn, pos + 1);
+      if (this.features.fuseResidual) this.gemv4Add(enc, S.attn, this.q4[L.o.weight], S.hidden, null, L.o.loraKey);
+      else {
+        this.gemv4(enc, S.attn, this.q4[L.o.weight], S.tmp, null, L.o.loraKey);
+        this._addInto(enc, S.hidden, S.tmp, c.hiddenSize);
       }
       this.rms(enc, S.hidden, this.bufs[L.postAttentionNorm], S.normed, c.hiddenSize);
-      if (this.features.actQuant) {
-        this.dynQuant(enc, S.normed, S.x_q, S.scale_x, c.hiddenSize);
-        this.gateUpSiluGemv4W4A8(enc, S.normed, S.x_q, S.scale_x, this.gateUp[L.index], S.tmp, L);
+      if (this.features.fuseMLP) {
+        this.gateUpSiluGemv4(enc, S.normed, this.gateUp[L.index], S.tmp, L);
       } else {
-        if (this.features.fuseMLP) {
-          this.gateUpSiluGemv4(enc, S.normed, this.gateUp[L.index], S.tmp, L);
-        } else {
-          this.gemv4(enc, S.normed, this.q4[L.gate.weight], S.tmp, null, L.gate.loraKey);
-          this.gemv4(enc, S.normed, this.q4[L.up.weight], S.tmp2, null, L.up.loraKey);
-          this._siluMul(enc, S.tmp, S.tmp2, c.intermediateSize);
-        }
+        this.gemv4(enc, S.normed, this.q4[L.gate.weight], S.tmp, null, L.gate.loraKey);
+        this.gemv4(enc, S.normed, this.q4[L.up.weight], S.tmp2, null, L.up.loraKey);
+        this._siluMul(enc, S.tmp, S.tmp2, c.intermediateSize);
       }
-      if (this.features.actQuant) {
-        this.dynQuant(enc, S.tmp, S.x_q, S.scale_x, c.intermediateSize);
-        if (this.features.fuseResidual) {
-          this.gemv4AddW4A8(enc, S.tmp, S.x_q, S.scale_x, this.q4[L.down.weight], S.hidden, null, L.down.loraKey);
-        } else {
-          this.gemv4W4A8(enc, S.tmp, S.x_q, S.scale_x, this.q4[L.down.weight], S.normed, null, L.down.loraKey);
-          this._addInto(enc, S.hidden, S.normed, c.hiddenSize);
-        }
-      } else {
-        if (this.features.fuseResidual) this.gemv4Add(enc, S.tmp, this.q4[L.down.weight], S.hidden, null, L.down.loraKey);
-        else {
-          this.gemv4(enc, S.tmp, this.q4[L.down.weight], S.normed, null, L.down.loraKey);
-          this._addInto(enc, S.hidden, S.normed, c.hiddenSize);
-        }
+      if (this.features.fuseResidual) this.gemv4Add(enc, S.tmp, this.q4[L.down.weight], S.hidden, null, L.down.loraKey);
+      else {
+        this.gemv4(enc, S.tmp, this.q4[L.down.weight], S.normed, null, L.down.loraKey);
+        this._addInto(enc, S.hidden, S.normed, c.hiddenSize);
       }
     }
     this.rms(enc, S.hidden, this.bufs[this.plan.finalNorm.name], S.normed, c.hiddenSize);
@@ -37731,19 +36664,19 @@ var QwenWGPU = class {
   }
   _addInto(enc, yBuf, aBuf, n) {
     const cache2 = n === this.cfg.hiddenSize;
-    const u = cache2 ? this.u.addHidden : this._uni(new Uint32Array([n]));
+    const u = cache2 ? this.u.addHidden : this._uni(new Uint32Array([n / 4]));
     const bg = cache2 ? this._bgCached(this.pipes.add, [aBuf, yBuf, u], `add:${n}`) : this._bg(this.pipes.add, [aBuf, yBuf, u]);
-    this._dispatch(enc, this.pipes.add, bg, Math.min(Math.ceil(n / 256), 65535), 1, "add");
+    this._dispatch(enc, this.pipes.add, bg, Math.min(Math.ceil(n / 1024), 65535), 1, "add");
   }
   _siluMul(enc, gateBuf, upBuf, n) {
     const cache2 = n === this.cfg.intermediateSize;
-    const u = cache2 ? this.u.siluIntermediate : this._uni(new Uint32Array([n]));
+    const u = cache2 ? this.u.siluIntermediate : this._uni(new Uint32Array([n / 4]));
     const bg = cache2 ? this._bgCached(this.pipes.silu, [gateBuf, upBuf, u], `silu:${n}`) : this._bg(this.pipes.silu, [gateBuf, upBuf, u]);
-    this._dispatch(enc, this.pipes.silu, bg, Math.min(Math.ceil(n / 256), 65535), 1, "silu");
+    this._dispatch(enc, this.pipes.silu, bg, Math.min(Math.ceil(n / 1024), 65535), 1, "silu");
   }
   embedRow(enc, id) {
     const e = this.q[this.plan.embed.name];
-    this._dispatch(enc, this.pipes.embed, this._bg(this.pipes.embed, [e.w, e.scale, this.s.hidden, this._uni(new Uint32Array([id, this.cfg.hiddenSize]))]), Math.ceil(this.cfg.hiddenSize / 256), 1, "embed");
+    this._dispatch(enc, this.pipes.embed, this._bg(this.pipes.embed, [e.w, e.scale, this.s.hidden, this._uni(new Uint32Array([id, this.cfg.hiddenSize]))]), Math.ceil(this.cfg.hiddenSize / 1024), 1, "embed");
   }
   async argmaxLogits() {
     if (this._argmaxReadBusy) throw new Error("argmaxLogits() is already in flight; concurrent generation is not supported");
@@ -37795,7 +36728,7 @@ var QwenWGPU = class {
   // embed the token id held in s.amax (GPU-resident, from a prior argmax)
   embedFromBuf(enc) {
     const e = this.q[this.plan.embed.name];
-    this._dispatch(enc, this.pipes.embedBuf, this._bgCached(this.pipes.embedBuf, [e.w, e.scale, this.s.hidden, this.s.amax, this.u.embedBuf], "embedBuf"), Math.ceil(this.cfg.hiddenSize / 256), 1, "embed");
+    this._dispatch(enc, this.pipes.embedBuf, this._bgCached(this.pipes.embedBuf, [e.w, e.scale, this.s.hidden, this.s.amax, this.u.embedBuf], "embedBuf"), Math.ceil(this.cfg.hiddenSize / 1024), 1, "embed");
   }
   // argmax(logits) -> s.amax, within the given encoder (no submit/readback)
   argmaxInto(enc) {
@@ -37834,45 +36767,30 @@ var QwenWGPU = class {
     const bg = this._bg(this.pipes.gemm4, [aBuf, q.w, q.scale, biasBuf || this.s.dummy, yBuf, meta]);
     this._dispatch(enc, this.pipes.gemm4, bg, Math.ceil(q.N / 64), Math.ceil(T / 16), "gemm4");
     const mod = this.lora?.modules?.[moduleKey];
-    if (mod) this.loraBatchDelta(enc, aBuf, yBuf, q, T, mod, moduleKey);
+    if (mod) this.loraBatchDelta(enc, aBuf, yBuf, q, T, mod);
   }
   gemm4AddT(enc, aBuf, q, yBuf, T, biasBuf, moduleKey) {
     const meta = new Uint32Array([q.K, q.N, T, q.gpr, biasBuf ? 1 : 0, 0, 0, 0]);
     const bg = this._bg(this.pipes.gemm4AddT, [aBuf, q.w, q.scale, biasBuf || this.s.dummy, yBuf, this._uni(meta)]);
     this._dispatch(enc, this.pipes.gemm4AddT, bg, Math.ceil(q.N / 64), Math.ceil(T / 16), "gemm4AddT");
     const mod = this.lora?.modules?.[moduleKey];
-    if (mod) this.loraBatchDelta(enc, aBuf, yBuf, q, T, mod, moduleKey);
+    if (mod) this.loraBatchDelta(enc, aBuf, yBuf, q, T, mod);
   }
-  loraBatchDelta(enc, xBuf, yBuf, q, T, mod, moduleKey) {
-    if (this.debugCapture) console.log("VWG loraBatchDelta: " + moduleKey + " mod=" + !!mod);
+  loraBatchDelta(enc, xBuf, yBuf, q, T, mod) {
     const uA = this._uni(new Uint32Array([q.K, mod.rank, T, 0]));
     const bgA = this._bg(this.pipes.loraABatch, [xBuf, mod.A, this.sT.loraD, uA]);
     this._dispatch(enc, this.pipes.loraABatch, bgA, mod.rank, T, "loraA:T");
-    if (this.debugCapture && moduleKey === "layers.0.self_attn.q_proj") {
-      enc.copyBufferToBuffer(xBuf, 0, this.debugBufs.xBat, 0, T * q.K * 4);
-      enc.copyBufferToBuffer(this.sT.loraD, 0, this.debugBufs.dBat, 0, T * mod.rank * 4);
-    }
-    const totalGroups = Math.ceil(T * q.N / 256);
-    let gx = totalGroups;
-    let gy = 1;
-    if (gx > 65535) {
-      gx = 256;
-      gy = Math.ceil(totalGroups / 256);
-    }
     const meta = new ArrayBuffer(32);
     const dv = new DataView(meta);
     dv.setUint32(0, T, true);
     dv.setUint32(4, q.N, true);
     dv.setUint32(8, mod.rank, true);
-    dv.setUint32(12, gx, true);
+    dv.setUint32(12, 0, true);
     dv.setFloat32(16, mod.scale, true);
+    const groups = Math.min(Math.ceil(T * q.N / 1024), 65535);
     const uB = this._uni(new Uint8Array(meta));
     const bgB = this._bg(this.pipes.loraBAddT, [this.sT.loraD, mod.B, yBuf, uB]);
-    this._dispatch(enc, this.pipes.loraBAddT, bgB, gx, gy, "loraB:T");
-    if (this.debugCapture && moduleKey === "layers.0.self_attn.q_proj") {
-      enc.copyBufferToBuffer(yBuf, 0, this.debugBufs.yBat, 0, T * q.N * 4);
-      this.debugCaptured = true;
-    }
+    this._dispatch(enc, this.pipes.loraBAddT, bgB, groups, 1, "loraB:T");
   }
   rmsT(enc, xBuf, gBuf, yBuf, T, K2) {
     const u = new ArrayBuffer(8);
@@ -37885,7 +36803,7 @@ var QwenWGPU = class {
   ropeT(enc, xBuf, T, nHeads, pos0 = 0) {
     const hd = this.cfg.headDim;
     const uni = this._uni(new Uint32Array([nHeads, hd, T, pos0]));
-    this._dispatch(enc, this.pipes.ropeT, this._bg(this.pipes.ropeT, [xBuf, this.ropeCos, this.ropeSin, uni]), Math.ceil(T * nHeads * (hd / 2) / 256), 1, "ropeT");
+    this._dispatch(enc, this.pipes.ropeT, this._bg(this.pipes.ropeT, [xBuf, this.ropeCos, this.ropeSin, uni]), Math.ceil(T * nHeads * (hd / 8) / 256), 1, "ropeT");
   }
   attnPrefill(enc, qBuf, kc, vc, oBuf, T, qStart = 0, ctx = T) {
     const c = this.cfg;
@@ -37915,9 +36833,7 @@ var QwenWGPU = class {
       tmp: this._buf(T * I * 4),
       tmp2: this._buf(T * I * 4),
       ids: this._buf(idsCap * 4),
-      loraD: this._buf(Math.max(1, T * Math.max(1, loraRank)) * 4),
-      x_q: this._buf(T * Math.max(H, I) * 4),
-      scale_x: this._buf(T * Math.max(H, I) / 128 * 4)
+      loraD: this._buf(Math.max(1, T * Math.max(1, loraRank)) * 4)
     };
     this.sTcap = T;
     this.sTLoraRank = loraRank;
@@ -37949,72 +36865,31 @@ var QwenWGPU = class {
     const enc = this.dev.createCommandEncoder();
     const e = this.q[this.plan.embed.name];
     const embedUni = this._uni(new Uint32Array([T, H, 0, 0]));
-    this._dispatch(enc, this.pipes.embedT, this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, embedUni]), Math.min(Math.ceil(T * H / 256), 65535), 1, "embedT");
+    this._dispatch(enc, this.pipes.embedT, this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, embedUni]), Math.min(Math.ceil(T * H / 1024), 65535), 1, "embedT");
     for (let i = 0; i < c.numLayers; i++) {
       const L = this.plan.layers[i];
       this.rmsT(enc, ST.hidden, this.bufs[L.inputNorm], ST.normed, T, H);
-      if (this.features.actQuant) {
-        this.dynQuantT(enc, ST.normed, ST.x_q, ST.scale_x, H, T);
-        this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.q.weight], ST.q, T, this.bufs[L.q.bias], L.q.loraKey);
-        this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.k.weight], ST.k, T, this.bufs[L.k.bias], L.k.loraKey);
-        this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.v.weight], ST.v, T, this.bufs[L.v.bias], L.v.loraKey);
-      } else {
-        this.gemm4(enc, ST.normed, this.q4[L.q.weight], ST.q, T, this.bufs[L.q.bias], L.q.loraKey);
-        this.gemm4(enc, ST.normed, this.q4[L.k.weight], ST.k, T, this.bufs[L.k.bias], L.k.loraKey);
-        this.gemm4(enc, ST.normed, this.q4[L.v.weight], ST.v, T, this.bufs[L.v.bias], L.v.loraKey);
-      }
+      this.gemm4(enc, ST.normed, this.q4[L.q.weight], ST.q, T, this.bufs[L.q.bias], L.q.loraKey);
+      this.gemm4(enc, ST.normed, this.q4[L.k.weight], ST.k, T, this.bufs[L.k.bias], L.k.loraKey);
+      this.gemm4(enc, ST.normed, this.q4[L.v.weight], ST.v, T, this.bufs[L.v.bias], L.v.loraKey);
       this.ropeT(enc, ST.q, T, c.numHeads);
       this.ropeT(enc, ST.k, T, c.numKVHeads);
-      if (this.features.pagedAttention) {
-        this.writeKvPageBatch(enc, ST.k, ST.v, this.kc[i], this.vc[i], T, 0, i);
-      } else {
-        enc.copyBufferToBuffer(ST.k, 0, this.kc[i], 0, T * kvd * 4);
-        enc.copyBufferToBuffer(ST.v, 0, this.vc[i], 0, T * kvd * 4);
-      }
-      if (this.features.pagedAttention) {
-        this.attnPrefillPaged(enc, ST.q, this.kc[i], this.vc[i], ST.attn, T, 0, T);
-      } else {
-        this.attnPrefill(enc, ST.q, this.kc[i], this.vc[i], ST.attn, T, 0, T);
-      }
-      if (this.features.actQuant) {
-        this.dynQuantT(enc, ST.attn, ST.x_q, ST.scale_x, H, T);
-        if (this.features.fuseResidual) {
-          this.gemm4AddTW4A8(enc, ST.attn, ST.x_q, ST.scale_x, this.q4[L.o.weight], ST.hidden, T, null, L.o.loraKey);
-        } else {
-          this.gemm4W4A8(enc, ST.attn, ST.x_q, ST.scale_x, this.q4[L.o.weight], ST.tmp, T, null, L.o.loraKey);
-          this._addInto(enc, ST.hidden, ST.tmp, T * H);
-        }
-      } else {
-        if (this.features.fuseResidual) this.gemm4AddT(enc, ST.attn, this.q4[L.o.weight], ST.hidden, T, null, L.o.loraKey);
-        else {
-          this.gemm4(enc, ST.attn, this.q4[L.o.weight], ST.tmp, T, null, L.o.loraKey);
-          this._addInto(enc, ST.hidden, ST.tmp, T * H);
-        }
+      enc.copyBufferToBuffer(ST.k, 0, this.kc[i], 0, T * kvd * 4);
+      enc.copyBufferToBuffer(ST.v, 0, this.vc[i], 0, T * kvd * 4);
+      this.attnPrefill(enc, ST.q, this.kc[i], this.vc[i], ST.attn, T, 0, T);
+      if (this.features.fuseResidual) this.gemm4AddT(enc, ST.attn, this.q4[L.o.weight], ST.hidden, T, null, L.o.loraKey);
+      else {
+        this.gemm4(enc, ST.attn, this.q4[L.o.weight], ST.tmp, T, null, L.o.loraKey);
+        this._addInto(enc, ST.hidden, ST.tmp, T * H);
       }
       this.rmsT(enc, ST.hidden, this.bufs[L.postAttentionNorm], ST.normed, T, H);
-      if (this.features.actQuant) {
-        this.dynQuantT(enc, ST.normed, ST.x_q, ST.scale_x, H, T);
-        this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.gate.weight], ST.tmp, T, null, L.gate.loraKey);
-        this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.up.weight], ST.tmp2, T, null, L.up.loraKey);
-      } else {
-        this.gemm4(enc, ST.normed, this.q4[L.gate.weight], ST.tmp, T, null, L.gate.loraKey);
-        this.gemm4(enc, ST.normed, this.q4[L.up.weight], ST.tmp2, T, null, L.up.loraKey);
-      }
+      this.gemm4(enc, ST.normed, this.q4[L.gate.weight], ST.tmp, T, null, L.gate.loraKey);
+      this.gemm4(enc, ST.normed, this.q4[L.up.weight], ST.tmp2, T, null, L.up.loraKey);
       this._siluMul(enc, ST.tmp, ST.tmp2, T * c.intermediateSize);
-      if (this.features.actQuant) {
-        this.dynQuantT(enc, ST.tmp, ST.x_q, ST.scale_x, c.intermediateSize, T);
-        if (this.features.fuseResidual) {
-          this.gemm4AddTW4A8(enc, ST.tmp, ST.x_q, ST.scale_x, this.q4[L.down.weight], ST.hidden, T, null, L.down.loraKey);
-        } else {
-          this.gemm4W4A8(enc, ST.tmp, ST.x_q, ST.scale_x, this.q4[L.down.weight], ST.normed, T, null, L.down.loraKey);
-          this._addInto(enc, ST.hidden, ST.normed, T * H);
-        }
-      } else {
-        if (this.features.fuseResidual) this.gemm4AddT(enc, ST.tmp, this.q4[L.down.weight], ST.hidden, T, null, L.down.loraKey);
-        else {
-          this.gemm4(enc, ST.tmp, this.q4[L.down.weight], ST.normed, T, null, L.down.loraKey);
-          this._addInto(enc, ST.hidden, ST.normed, T * H);
-        }
+      if (this.features.fuseResidual) this.gemm4AddT(enc, ST.tmp, this.q4[L.down.weight], ST.hidden, T, null, L.down.loraKey);
+      else {
+        this.gemm4(enc, ST.tmp, this.q4[L.down.weight], ST.normed, T, null, L.down.loraKey);
+        this._addInto(enc, ST.hidden, ST.normed, T * H);
       }
     }
     enc.copyBufferToBuffer(ST.hidden, (T - 1) * H * 4, S.hidden, 0, H * 4);
@@ -38034,72 +36909,31 @@ var QwenWGPU = class {
     for (let off = 0; off < T; off += chunkSize) {
       const end = Math.min(T, off + chunkSize);
       const CT = end - off;
-      this._dispatch(enc, this.pipes.embedT, this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, this._uni(new Uint32Array([CT, H, off, 0]))]), Math.min(Math.ceil(CT * H / 256), 65535), 1, "embedT");
+      this._dispatch(enc, this.pipes.embedT, this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, this._uni(new Uint32Array([CT, H, off, 0]))]), Math.min(Math.ceil(CT * H / 1024), 65535), 1, "embedT");
       for (let i = 0; i < c.numLayers; i++) {
         const L = this.plan.layers[i];
         this.rmsT(enc, ST.hidden, this.bufs[L.inputNorm], ST.normed, CT, H);
-        if (this.features.actQuant) {
-          this.dynQuantT(enc, ST.normed, ST.x_q, ST.scale_x, H, CT);
-          this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.q.weight], ST.q, CT, this.bufs[L.q.bias], L.q.loraKey);
-          this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.k.weight], ST.k, CT, this.bufs[L.k.bias], L.k.loraKey);
-          this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.v.weight], ST.v, CT, this.bufs[L.v.bias], L.v.loraKey);
-        } else {
-          this.gemm4(enc, ST.normed, this.q4[L.q.weight], ST.q, CT, this.bufs[L.q.bias], L.q.loraKey);
-          this.gemm4(enc, ST.normed, this.q4[L.k.weight], ST.k, CT, this.bufs[L.k.bias], L.k.loraKey);
-          this.gemm4(enc, ST.normed, this.q4[L.v.weight], ST.v, CT, this.bufs[L.v.bias], L.v.loraKey);
-        }
+        this.gemm4(enc, ST.normed, this.q4[L.q.weight], ST.q, CT, this.bufs[L.q.bias], L.q.loraKey);
+        this.gemm4(enc, ST.normed, this.q4[L.k.weight], ST.k, CT, this.bufs[L.k.bias], L.k.loraKey);
+        this.gemm4(enc, ST.normed, this.q4[L.v.weight], ST.v, CT, this.bufs[L.v.bias], L.v.loraKey);
         this.ropeT(enc, ST.q, CT, c.numHeads, off);
         this.ropeT(enc, ST.k, CT, c.numKVHeads, off);
-        if (this.features.pagedAttention) {
-          this.writeKvPageBatch(enc, ST.k, ST.v, this.kc[i], this.vc[i], CT, off, i);
-        } else {
-          enc.copyBufferToBuffer(ST.k, 0, this.kc[i], off * kvd * 4, CT * kvd * 4);
-          enc.copyBufferToBuffer(ST.v, 0, this.vc[i], off * kvd * 4, CT * kvd * 4);
-        }
-        if (this.features.pagedAttention) {
-          this.attnPrefillPaged(enc, ST.q, this.kc[i], this.vc[i], ST.attn, CT, off, end);
-        } else {
-          this.attnPrefill(enc, ST.q, this.kc[i], this.vc[i], ST.attn, CT, off, end);
-        }
-        if (this.features.actQuant) {
-          this.dynQuantT(enc, ST.attn, ST.x_q, ST.scale_x, H, CT);
-          if (this.features.fuseResidual) {
-            this.gemm4AddTW4A8(enc, ST.attn, ST.x_q, ST.scale_x, this.q4[L.o.weight], ST.hidden, CT, null, L.o.loraKey);
-          } else {
-            this.gemm4W4A8(enc, ST.attn, ST.x_q, ST.scale_x, this.q4[L.o.weight], ST.tmp, CT, null, L.o.loraKey);
-            this._addInto(enc, ST.hidden, ST.tmp, CT * H);
-          }
-        } else {
-          if (this.features.fuseResidual) this.gemm4AddT(enc, ST.attn, this.q4[L.o.weight], ST.hidden, CT, null, L.o.loraKey);
-          else {
-            this.gemm4(enc, ST.attn, this.q4[L.o.weight], ST.tmp, CT, null, L.o.loraKey);
-            this._addInto(enc, ST.hidden, ST.tmp, CT * H);
-          }
+        enc.copyBufferToBuffer(ST.k, 0, this.kc[i], off * kvd * 4, CT * kvd * 4);
+        enc.copyBufferToBuffer(ST.v, 0, this.vc[i], off * kvd * 4, CT * kvd * 4);
+        this.attnPrefill(enc, ST.q, this.kc[i], this.vc[i], ST.attn, CT, off, end);
+        if (this.features.fuseResidual) this.gemm4AddT(enc, ST.attn, this.q4[L.o.weight], ST.hidden, CT, null, L.o.loraKey);
+        else {
+          this.gemm4(enc, ST.attn, this.q4[L.o.weight], ST.tmp, CT, null, L.o.loraKey);
+          this._addInto(enc, ST.hidden, ST.tmp, CT * H);
         }
         this.rmsT(enc, ST.hidden, this.bufs[L.postAttentionNorm], ST.normed, CT, H);
-        if (this.features.actQuant) {
-          this.dynQuantT(enc, ST.normed, ST.x_q, ST.scale_x, H, CT);
-          this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.gate.weight], ST.tmp, CT, null, L.gate.loraKey);
-          this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.up.weight], ST.tmp2, CT, null, L.up.loraKey);
-        } else {
-          this.gemm4(enc, ST.normed, this.q4[L.gate.weight], ST.tmp, CT, null, L.gate.loraKey);
-          this.gemm4(enc, ST.normed, this.q4[L.up.weight], ST.tmp2, CT, null, L.up.loraKey);
-        }
+        this.gemm4(enc, ST.normed, this.q4[L.gate.weight], ST.tmp, CT, null, L.gate.loraKey);
+        this.gemm4(enc, ST.normed, this.q4[L.up.weight], ST.tmp2, CT, null, L.up.loraKey);
         this._siluMul(enc, ST.tmp, ST.tmp2, CT * c.intermediateSize);
-        if (this.features.actQuant) {
-          this.dynQuantT(enc, ST.tmp, ST.x_q, ST.scale_x, c.intermediateSize, CT);
-          if (this.features.fuseResidual) {
-            this.gemm4AddTW4A8(enc, ST.tmp, ST.x_q, ST.scale_x, this.q4[L.down.weight], ST.hidden, CT, null, L.down.loraKey);
-          } else {
-            this.gemm4W4A8(enc, ST.tmp, ST.x_q, ST.scale_x, this.q4[L.down.weight], ST.normed, CT, null, L.down.loraKey);
-            this._addInto(enc, ST.hidden, ST.normed, CT * H);
-          }
-        } else {
-          if (this.features.fuseResidual) this.gemm4AddT(enc, ST.tmp, this.q4[L.down.weight], ST.hidden, CT, null, L.down.loraKey);
-          else {
-            this.gemm4(enc, ST.tmp, this.q4[L.down.weight], ST.normed, CT, null, L.down.loraKey);
-            this._addInto(enc, ST.hidden, ST.normed, CT * H);
-          }
+        if (this.features.fuseResidual) this.gemm4AddT(enc, ST.tmp, this.q4[L.down.weight], ST.hidden, CT, null, L.down.loraKey);
+        else {
+          this.gemm4(enc, ST.tmp, this.q4[L.down.weight], ST.normed, CT, null, L.down.loraKey);
+          this._addInto(enc, ST.hidden, ST.normed, CT * H);
         }
       }
       if (end === T) {
@@ -38110,250 +36944,12 @@ var QwenWGPU = class {
     this.gemv(enc, S.normed, this.q[this.plan.embed.name], S.logits, null, null);
     this.dev.queue.submit([enc.finish()]);
   }
-  async speculativeDecode(draftModel, promptIds, maxNewTokens, onToken) {
-    await this.prefillBatch(promptIds);
-    await draftModel.prefillBatch(promptIds);
-    let currentPos = promptIds.length;
-    const generatedIds = [];
-    let nextToken = await this.argmaxLogits();
-    generatedIds.push(nextToken);
-    if (onToken) onToken(nextToken);
-    draftModel.dev.queue.writeBuffer(draftModel.s.amax, 0, new Uint32Array([nextToken]));
-    this.dev.queue.writeBuffer(this.s.amax, 0, new Uint32Array([nextToken]));
-    const gamma = 4;
-    while (generatedIds.length < maxNewTokens) {
-      const draftCandidates = await draftModel.decodeBatch(currentPos, gamma);
-      if (draftCandidates.length === 0) break;
-      const T = draftCandidates.length;
-      this._resetUni();
-      this._ensurePrefillScratch(T, this._activeMaxLoraRank());
-      const ST = this.sT;
-      const c = this.cfg, H = c.hiddenSize, kvd = c.numKVHeads * c.headDim;
-      this.dev.queue.writeBuffer(ST.ids, 0, new Uint32Array(draftCandidates));
-      const enc = this.dev.createCommandEncoder();
-      const e = this.q[this.plan.embed.name];
-      const embedUni = this._uni(new Uint32Array([T, H, 0, 0]));
-      this._dispatch(enc, this.pipes.embedT, this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, embedUni]), Math.min(Math.ceil(T * H / 256), 65535), 1, "embedT");
-      for (let i = 0; i < c.numLayers; i++) {
-        const L = this.plan.layers[i];
-        this.rmsT(enc, ST.hidden, this.bufs[L.inputNorm], ST.normed, T, H);
-        if (this.features.actQuant) {
-          this.dynQuantT(enc, ST.normed, ST.x_q, ST.scale_x, H, T);
-          this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.q.weight], ST.q, T, this.bufs[L.q.bias], L.q.loraKey);
-          this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.k.weight], ST.k, T, this.bufs[L.k.bias], L.k.loraKey);
-          this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.v.weight], ST.v, T, this.bufs[L.v.bias], L.v.loraKey);
-        } else {
-          this.gemm4(enc, ST.normed, this.q4[L.q.weight], ST.q, T, this.bufs[L.q.bias], L.q.loraKey);
-          this.gemm4(enc, ST.normed, this.q4[L.k.weight], ST.k, T, this.bufs[L.k.bias], L.k.loraKey);
-          this.gemm4(enc, ST.normed, this.q4[L.v.weight], ST.v, T, this.bufs[L.v.bias], L.v.loraKey);
-        }
-        this.ropeT(enc, ST.q, T, c.numHeads, currentPos);
-        this.ropeT(enc, ST.k, T, c.numKVHeads, currentPos);
-        if (this.features.pagedAttention) {
-          this.writeKvPageBatch(enc, ST.k, ST.v, this.kc[i], this.vc[i], T, currentPos, i);
-        } else {
-          enc.copyBufferToBuffer(ST.k, 0, this.kc[i], currentPos * kvd * 4, T * kvd * 4);
-          enc.copyBufferToBuffer(ST.v, 0, this.vc[i], currentPos * kvd * 4, T * kvd * 4);
-        }
-        if (this.features.pagedAttention) {
-          this.attnPrefillPaged(enc, ST.q, this.kc[i], this.vc[i], ST.attn, T, currentPos, currentPos + T);
-        } else {
-          this.attnPrefill(enc, ST.q, this.kc[i], this.vc[i], ST.attn, T, currentPos, currentPos + T);
-        }
-        if (this.features.actQuant) {
-          this.dynQuantT(enc, ST.attn, ST.x_q, ST.scale_x, H, T);
-          if (this.features.fuseResidual) {
-            this.gemm4AddTW4A8(enc, ST.attn, ST.x_q, ST.scale_x, this.q4[L.o.weight], ST.hidden, T, null, L.o.loraKey);
-          } else {
-            this.gemm4W4A8(enc, ST.attn, ST.x_q, ST.scale_x, this.q4[L.o.weight], ST.tmp, T, null, L.o.loraKey);
-            this._addInto(enc, ST.hidden, ST.tmp, T * H);
-          }
-        } else {
-          if (this.features.fuseResidual) this.gemm4AddT(enc, ST.attn, this.q4[L.o.weight], ST.hidden, T, null, L.o.loraKey);
-          else {
-            this.gemm4(enc, ST.attn, this.q4[L.o.weight], ST.tmp, T, null, L.o.loraKey);
-            this._addInto(enc, ST.hidden, ST.tmp, T * H);
-          }
-        }
-        this.rmsT(enc, ST.hidden, this.bufs[L.postAttentionNorm], ST.normed, T, H);
-        if (this.features.actQuant) {
-          this.dynQuantT(enc, ST.normed, ST.x_q, ST.scale_x, H, T);
-          this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.gate.weight], ST.tmp, T, null, L.gate.loraKey);
-          this.gemm4W4A8(enc, ST.normed, ST.x_q, ST.scale_x, this.q4[L.up.weight], ST.tmp2, T, null, L.up.loraKey);
-        } else {
-          this.gemm4(enc, ST.normed, this.q4[L.gate.weight], ST.tmp, T, null, L.gate.loraKey);
-          this.gemm4(enc, ST.normed, this.q4[L.up.weight], ST.tmp2, T, null, L.up.loraKey);
-        }
-        this._siluMul(enc, ST.tmp, ST.tmp2, T * c.intermediateSize);
-        if (this.features.actQuant) {
-          this.dynQuantT(enc, ST.tmp, ST.x_q, ST.scale_x, c.intermediateSize, T);
-          if (this.features.fuseResidual) {
-            this.gemm4AddTW4A8(enc, ST.tmp, ST.x_q, ST.scale_x, this.q4[L.down.weight], ST.hidden, T, null, L.down.loraKey);
-          } else {
-            this.gemm4W4A8(enc, ST.tmp, ST.x_q, ST.scale_x, this.q4[L.down.weight], ST.normed, T, null, L.down.loraKey);
-            this._addInto(enc, ST.hidden, ST.normed, T * H);
-          }
-        } else {
-          if (this.features.fuseResidual) this.gemm4AddT(enc, ST.tmp, this.q4[L.down.weight], ST.hidden, T, null, L.down.loraKey);
-          else {
-            this.gemm4(enc, ST.tmp, this.q4[L.down.weight], ST.normed, T, null, L.down.loraKey);
-            this._addInto(enc, ST.hidden, ST.normed, T * H);
-          }
-        }
-      }
-      if (!this.s.logitsT || this.sTcap < T) {
-        if (this.s.logitsT) this.s.logitsT.destroy();
-        this.s.logitsT = this._buf(T * c.vocabSize * 4);
-        if (this.logitsTRead) this.logitsTRead.destroy();
-        this.logitsTRead = this._buf(T * c.vocabSize * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
-      }
-      for (let t = 0; t < T; t++) {
-        enc.copyBufferToBuffer(ST.hidden, t * H * 4, this.s.hidden, 0, H * 4);
-        this.rms(enc, this.s.hidden, this.bufs[this.plan.finalNorm.name], this.s.normed, H);
-        this.gemv(enc, this.s.normed, this.q[this.plan.embed.name], this.s.logits, null, null);
-        enc.copyBufferToBuffer(this.s.logits, 0, this.s.logitsT, t * c.vocabSize * 4, c.vocabSize * 4);
-      }
-      enc.copyBufferToBuffer(this.s.logitsT, 0, this.logitsTRead, 0, T * c.vocabSize * 4);
-      this.dev.queue.submit([enc.finish()]);
-      await this.logitsTRead.mapAsync(GPUMapMode.READ);
-      const logitsArray = new Float32Array(this.logitsTRead.getMappedRange());
-      let acceptedCount = 0;
-      let targetToken = 0;
-      for (let t = 0; t < T; t++) {
-        let maxVal = -1e30;
-        let argmaxId = 0;
-        const offset = t * c.vocabSize;
-        for (let v = 0; v < c.vocabSize; v++) {
-          const l = logitsArray[offset + v];
-          if (l > maxVal) {
-            maxVal = l;
-            argmaxId = v;
-          }
-        }
-        targetToken = argmaxId;
-        if (t < T) {
-          if (draftCandidates[t] === targetToken) {
-            acceptedCount++;
-          } else {
-            break;
-          }
-        }
-      }
-      this.logitsTRead.unmap();
-      for (let a = 0; a < acceptedCount; a++) {
-        generatedIds.push(draftCandidates[a]);
-        if (onToken) onToken(draftCandidates[a]);
-      }
-      generatedIds.push(targetToken);
-      if (onToken) onToken(targetToken);
-      const nextPos = currentPos + acceptedCount + 1;
-      this.dev.queue.writeBuffer(this.s.amax, 0, new Uint32Array([targetToken]));
-      draftModel.dev.queue.writeBuffer(draftModel.s.amax, 0, new Uint32Array([targetToken]));
-      if (this.features.pagedAttention) {
-        this.pam.ensureBlocks(0, nextPos);
-      }
-      currentPos = nextPos;
-    }
-    return generatedIds;
-  }
-  setupDebugCapture(T, K2, rank, N) {
-    this.debugCapture = true;
-    this.debugT = T;
-    this.debugK = K2;
-    this.debugRank = rank;
-    this.debugN = N;
-    this.debugStep = 0;
-    this.debugCaptured = false;
-    this.debugBufs = {
-      xSeq: this._buf(T * K2 * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ),
-      dSeq: this._buf(T * rank * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ),
-      ySeq: this._buf(T * N * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ),
-      xBat: this._buf(T * K2 * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ),
-      dBat: this._buf(T * rank * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ),
-      yBat: this._buf(T * N * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ)
-    };
-  }
-  async readDebugCapture() {
-    this.debugCapture = false;
-    const bufs = this.debugBufs;
-    if (!bufs) return null;
-    await Promise.all([
-      bufs.xSeq.mapAsync(GPUMapMode.READ),
-      bufs.dSeq.mapAsync(GPUMapMode.READ),
-      bufs.ySeq.mapAsync(GPUMapMode.READ),
-      bufs.xBat.mapAsync(GPUMapMode.READ),
-      bufs.dBat.mapAsync(GPUMapMode.READ),
-      bufs.yBat.mapAsync(GPUMapMode.READ)
-    ]);
-    const res = {
-      xSeq: new Float32Array(bufs.xSeq.getMappedRange()).slice(),
-      dSeq: new Float32Array(bufs.dSeq.getMappedRange()).slice(),
-      ySeq: new Float32Array(bufs.ySeq.getMappedRange()).slice(),
-      xBat: new Float32Array(bufs.xBat.getMappedRange()).slice(),
-      dBat: new Float32Array(bufs.dBat.getMappedRange()).slice(),
-      yBat: new Float32Array(bufs.yBat.getMappedRange()).slice()
-    };
-    bufs.xSeq.unmap();
-    bufs.xSeq.destroy();
-    bufs.dSeq.unmap();
-    bufs.dSeq.destroy();
-    bufs.ySeq.unmap();
-    bufs.ySeq.destroy();
-    bufs.xBat.unmap();
-    bufs.xBat.destroy();
-    bufs.dBat.unmap();
-    bufs.dBat.destroy();
-    bufs.yBat.unmap();
-    bufs.yBat.destroy();
-    this.debugBufs = null;
-    return res;
-  }
-};
-var PagedAttentionManager = class {
-  constructor(maxCtx, pageSize = 16) {
-    this.pageSize = pageSize;
-    this.maxCtx = maxCtx;
-    this.maxBlocksPerSeq = Math.ceil(maxCtx / pageSize);
-    this.freeBlocks = [];
-    this.seqBlocks = /* @__PURE__ */ new Map();
-    const totalBlocks = this.maxBlocksPerSeq * 4;
-    for (let i = 0; i < totalBlocks; i++) {
-      this.freeBlocks.push(i);
-    }
-  }
-  allocateSeq(seqId) {
-    this.seqBlocks.set(seqId, []);
-  }
-  freeSeq(seqId) {
-    const blocks = this.seqBlocks.get(seqId) || [];
-    this.freeBlocks.push(...blocks);
-    this.seqBlocks.delete(seqId);
-  }
-  ensureBlocks(seqId, numTokens) {
-    const neededBlocks = Math.ceil(numTokens / this.pageSize);
-    const blocks = this.seqBlocks.get(seqId);
-    if (!blocks) throw new Error(`Sequence ${seqId} not allocated`);
-    while (blocks.length < neededBlocks) {
-      if (this.freeBlocks.length === 0) {
-        const newBlock = blocks.length + 1e3;
-        this.freeBlocks.push(newBlock);
-      }
-      blocks.push(this.freeBlocks.pop());
-    }
-    return blocks;
-  }
-  getBlockTableArray(seqId) {
-    const blocks = this.seqBlocks.get(seqId) || [];
-    const arr = new Uint32Array(this.maxBlocksPerSeq);
-    arr.set(blocks);
-    return arr;
-  }
 };
 
 // src/services/device_service.js
-async function initWebGPUDevice({ log: log2 = () => {
+async function initWebGPUDevice({ log = () => {
 } } = {}) {
-  log2("requesting WebGPU device\u2026");
+  log("requesting WebGPU device\u2026");
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("no WebGPU adapter (use a WebGPU-capable browser)");
   if (!adapter.features.has("subgroups")) throw new Error('GPU lacks the required "subgroups" feature. The current fast WGSL kernels require subgroups and no fallback kernel set is bundled.');
@@ -38361,12 +36957,11 @@ async function initWebGPUDevice({ log: log2 = () => {
     requiredFeatures: ["subgroups"],
     requiredLimits: {
       maxBufferSize: adapter.limits.maxBufferSize,
-      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-      maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize
     }
   });
   dev.addEventListener?.("uncapturederror", (e) => console.error("GPUERR", e.error.message));
-  log2(`WebGPU ready. maxBuffer=${(Number(adapter.limits.maxBufferSize) / 1e9).toFixed(2)}GB`);
+  log(`WebGPU ready. maxBuffer=${(Number(adapter.limits.maxBufferSize) / 1e9).toFixed(2)}GB`);
   return dev;
 }
 
@@ -38426,10 +37021,10 @@ function sampleTopK(candidates, { temperature, topP = 1 }) {
   return weighted[weighted.length - 1]?.id ?? candidates[0]?.id ?? 0;
 }
 var ModelSession = class {
-  constructor({ cfg = QWEN25_3B, log: log2 = () => {
+  constructor({ cfg = QWEN25_3B, log = () => {
   }, runtimeOptions = {} } = {}) {
     this.cfg = cfg;
-    this.log = log2;
+    this.log = log;
     this.runtimeOptions = { decodeBatchSize: "auto", samplingTopK: 40, ...runtimeOptions };
     this.dev = null;
     this.rt = null;
@@ -38514,115 +37109,95 @@ var ModelSession = class {
   }
 };
 
-// src/main.js
-var $2 = (id) => document.getElementById(id);
-var log = (m) => {
-  const s = $2("status");
-  if (s) s.textContent = m;
-  console.log("[harness]", m);
-};
-var SYS = `You are a senior bug bounty triage analyst. Read the submission and assign exactly ONE disposition from: valid_impactful, valid_low, corroborated_surge, likely_duplicate, out_of_scope, theoretical_no_poc, self_inflicted, accepted_risk, slop. Estimate severity_estimate (critical/high/medium/low/none). Think step by step, then output a SINGLE JSON object on the last line with keys: disposition, severity_estimate, is_duplicate_risk, reasoning, questions_for_researcher, confidence. Output only valid JSON for that object.`;
-var session = new ModelSession({ cfg: QWEN25_3B, log });
-var adapters = new AdapterRegistry();
-var generation = new GenerationController({ session, adapters, systemPrompt: SYS, log });
-async function loadWith(reader, label) {
-  await session.loadWith(reader, label);
-  $2("go").disabled = false;
-  $2("loraFile").disabled = false;
-}
-function addAdapterOption(name, modules, where) {
-  adapters.add(name, modules);
-  const opt = document.createElement("option");
-  opt.value = name;
-  opt.textContent = `${name} (${Object.keys(modules).length} modules${where ? ", " + where : ""})`;
-  $2("adapter").appendChild(opt);
-  $2("adapter").value = name;
-  log(`LoRA "${name}" loaded (${Object.keys(modules).length} modules) \u2014 Triage to hot-swap.`);
-}
-async function runTriage() {
-  $2("go").disabled = true;
-  try {
-    await generation.runTriage({
-      adapterName: $2("adapter").value,
-      report: $2("report").value,
-      outputNode: $2("out")
-    });
-  } finally {
-    $2("go").disabled = false;
-  }
-}
-async function fetchHfAdapterFiles(repo, token) {
-  const headers = token ? { Authorization: `Bearer ${token}` } : {};
-  const grab = async (n) => {
-    const r = await fetch(`https://huggingface.co/${repo}/resolve/main/${n}`, { headers });
-    if (!r.ok) return null;
-    const buf = await r.arrayBuffer();
-    return { name: n, async text() {
+// src/emberglass_bridge.js
+function fileLike(name, buf) {
+  return {
+    name,
+    async text() {
       return new TextDecoder().decode(buf);
-    }, async arrayBuffer() {
-      return buf;
-    } };
+    },
+    async arrayBuffer() {
+      return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    }
   };
-  const st2 = await grab("adapters.safetensors") || await grab("adapter_model.safetensors");
-  if (!st2) throw new Error("no adapters.safetensors / adapter_model.safetensors in " + repo);
-  const cfg = await grab("adapter_config.json");
-  return cfg ? [st2, cfg] : [st2];
 }
-window.addEventListener("DOMContentLoaded", () => {
-  $2("load").onclick = () => loadWith(urlReader($2("modelUrl").value.trim()), $2("modelUrl").value.trim()).catch((e) => {
-    log("ERROR: " + e.message);
-    console.error(e);
+async function fetchAdapterFiles(baseUrl, headers = {}) {
+  const base = baseUrl.replace(/\/$/, "");
+  const names = ["adapter_config.json", "adapters.safetensors", "adapter_model.safetensors"];
+  const out = [];
+  for (const name of names) {
+    const res = await fetch(`${base}/${name}`, { headers });
+    if (!res.ok) continue;
+    out.push(fileLike(name, new Uint8Array(await res.arrayBuffer())));
+  }
+  if (!out.some((f) => f.name.endsWith(".safetensors"))) throw new Error(`no adapter weights under ${base}`);
+  if (!out.some((f) => f.name === "adapter_config.json")) throw new Error(`no adapter_config.json under ${base}`);
+  return out;
+}
+async function createEmberglassEngine(opts = {}) {
+  const log = opts.log || (() => {
   });
-  const hfBtn = $2("loadHF");
-  if (hfBtn) hfBtn.onclick = () => {
-    const repo = $2("hfRepo").value.trim();
-    const token = ($2("hfToken")?.value || "").trim();
-    if (!repo) return log("enter a Hugging Face repo id, e.g. WeiboAI/VibeThinker-3B");
-    loadWith(hfReader(repo, token), "HF: " + repo).catch((e) => {
-      log("ERROR: " + e.message + " (private/gated repo? add a token)");
-      console.error(e);
-    });
-  };
-  const mf = $2("modelFiles");
-  if (mf) mf.onchange = (ev) => {
-    const files = [...ev.target.files];
-    if (!files.length) return;
-    const map = {};
-    for (const f of files) map[f.name] = f;
-    loadWith(fileReader(map), `${files.length} local files`).catch((e) => {
-      log("ERROR: " + e.message);
-      console.error(e);
-    });
-  };
-  $2("go").onclick = () => runTriage().catch((e) => {
-    log("ERROR: " + e.message);
-    console.error(e);
+  const onProgress = opts.onProgress || (() => {
   });
-  $2("loraFile").onchange = async (ev) => {
-    try {
-      const { name, modules } = await loadLoraAdapterGPU(session.dev, [...ev.target.files], QWEN25_3B);
-      addAdapterOption(name, modules);
-    } catch (e) {
-      log("LoRA load error: " + e.message);
-      console.error(e);
+  const session = new ModelSession({
+    cfg: QWEN25_3B,
+    log,
+    runtimeOptions: {
+      decodeBatchSize: "auto",
+      decodeBatchMinTokPerSec: 20,
+      samplingTopK: 40,
+      ...opts.runtimeOptions || {}
+    }
+  });
+  let reader, label;
+  if (opts.modelUrl) {
+    reader = urlReader(opts.modelUrl);
+    label = opts.modelUrl;
+  } else {
+    const repo = opts.hfRepo || "WeiboAI/VibeThinker-3B";
+    reader = hfReader(repo, opts.hfToken || "");
+    label = `HF:${repo}`;
+  }
+  onProgress("streaming model weights", 0.05);
+  await session.loadWith(reader, label);
+  if (opts.loraUrl) {
+    onProgress("loading LoRA adapter", 0.92);
+    const files = await fetchAdapterFiles(opts.loraUrl);
+    const lora = await loadLoraAdapterGPU(session.dev, files, QWEN25_3B);
+    session.rt.setLora(lora);
+    log(`LoRA loaded from ${opts.loraUrl} (${Object.keys(lora.modules).length} modules)`);
+  } else if (opts.loraRepo) {
+    onProgress("loading LoRA from Hugging Face", 0.92);
+    const headers = opts.hfToken ? { Authorization: `Bearer ${opts.hfToken}` } : {};
+    const grab = async (n) => {
+      const r = await fetch(`https://huggingface.co/${opts.loraRepo}/resolve/main/${n}`, { headers });
+      if (!r.ok) return null;
+      return fileLike(n, new Uint8Array(await r.arrayBuffer()));
+    };
+    const st2 = await grab("adapters.safetensors") || await grab("adapter_model.safetensors");
+    if (!st2) throw new Error(`no adapter weights in HF repo ${opts.loraRepo}`);
+    const cfg = await grab("adapter_config.json");
+    const lora = await loadLoraAdapterGPU(session.dev, cfg ? [st2, cfg] : [st2], QWEN25_3B);
+    session.rt.setLora(lora);
+    log(`LoRA loaded from HF:${opts.loraRepo} (${Object.keys(lora.modules).length} modules)`);
+  }
+  onProgress("ready", 1);
+  return {
+    label: "emberglass (custom webgpu)",
+    async chatComplete(messages, { maxTokens = 4096, temperature = 0 } = {}) {
+      let out = "";
+      for await (const delta of session.generate(messages, { maxTokens, temperature })) out += delta;
+      return out;
+    },
+    dispose() {
+      session.rt = null;
+      session.dev = null;
     }
   };
-  const hfLoraBtn = $2("loadHFLora");
-  if (hfLoraBtn) hfLoraBtn.onclick = async () => {
-    if (!session.dev) return log("load a model first, then load a LoRA adapter");
-    const repo = ($2("hfLora")?.value || "").trim();
-    const token = ($2("hfToken")?.value || "").trim();
-    if (!repo) return log("enter a Hugging Face LoRA adapter repo id");
-    try {
-      const files = await fetchHfAdapterFiles(repo, token);
-      const { name, modules } = await loadLoraAdapterGPU(session.dev, files, QWEN25_3B);
-      addAdapterOption(repo.split("/").pop() || name, modules, "HF");
-    } catch (e) {
-      log("HF LoRA error: " + e.message + (token ? "" : " (private/gated? add a token)"));
-      console.error(e);
-    }
-  };
-});
+}
+export {
+  createEmberglassEngine
+};
 /*! Bundled license information:
 
 onnxruntime-web/dist/ort.webgpu.bundle.min.mjs:

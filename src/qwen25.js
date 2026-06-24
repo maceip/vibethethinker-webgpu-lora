@@ -47,7 +47,7 @@ export class QwenModel {
   constructor(config, weights) {
     this.cfg = config;
     this.w = weights;
-    this.lora = null;           // active LoraAdapter (or null)
+    this.lora = null; // active LoraAdapter (or null)
     this._pretransposeProjections(); // work around tf.js webgpu transposeB bug
     this._precomputeRope(8192); // max context for the cos/sin tables
   }
@@ -58,7 +58,15 @@ export class QwenModel {
   // (correct at all sizes). embed_tokens is left as-is (gather + lm_head matmul,
   // whose 151936 output is unaffected by the bug).
   _pretransposeProjections() {
-    const suffixes = ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj'];
+    const suffixes = [
+      'self_attn.q_proj',
+      'self_attn.k_proj',
+      'self_attn.v_proj',
+      'self_attn.o_proj',
+      'mlp.gate_proj',
+      'mlp.up_proj',
+      'mlp.down_proj',
+    ];
     for (let i = 0; i < this.cfg.numLayers; i++) {
       for (const s of suffixes) {
         const name = `model.layers.${i}.${s}.weight`;
@@ -72,9 +80,15 @@ export class QwenModel {
   }
 
   // ---- runtime LoRA hot-swap ------------------------------------------------
-  setLora(adapter) { this.lora = adapter; }   // swap with no base reload
-  clearLora() { this.lora = null; }
-  get activeLora() { return this.lora?.name ?? null; }
+  setLora(adapter) {
+    this.lora = adapter;
+  } // swap with no base reload
+  clearLora() {
+    this.lora = null;
+  }
+  get activeLora() {
+    return this.lora?.name ?? null;
+  }
 
   // ---- core ops -------------------------------------------------------------
 
@@ -111,10 +125,13 @@ export class QwenModel {
     for (let p = 0; p < maxSeq; p++) {
       for (let i = 0; i < half; i++) {
         const ang = p * inv[i];
-        const c = Math.cos(ang), s = Math.sin(ang);
+        const c = Math.cos(ang),
+          s = Math.sin(ang);
         // layout matches rotate-half: [first half | second half] share freq i
-        cos[p * headDim + i] = c;       cos[p * headDim + half + i] = c;
-        sin[p * headDim + i] = s;       sin[p * headDim + half + i] = s;
+        cos[p * headDim + i] = c;
+        cos[p * headDim + half + i] = c;
+        sin[p * headDim + i] = s;
+        sin[p * headDim + half + i] = s;
       }
     }
     this._ropeCos = tf.tensor2d(cos, [maxSeq, headDim]); // [maxSeq, headDim]
@@ -138,7 +155,8 @@ export class QwenModel {
   /** One decoder layer. kv = {k,v} cache tensors [B,nKV,Tpast,hd] or null. */
   layer(i, hidden, startPos, kvCache) {
     const { numHeads, numKVHeads, headDim } = this.cfg;
-    const B = hidden.shape[0], T = hidden.shape[1];
+    const B = hidden.shape[0],
+      T = hidden.shape[1];
     const p = `model.layers.${i}`;
 
     // Single tidy returning [h2, newK, newV]. tf.tidy auto-keeps tensors in the
@@ -146,9 +164,24 @@ export class QwenModel {
     // buffer lifetimes on the webgpu backend and corrupted the output).
     const [h2, newK, newV] = tf.tidy(() => {
       const normed = this.rmsNorm(hidden, `${p}.input_layernorm.weight`);
-      let q = this.proj(normed, `${p}.self_attn.q_proj.weight`, `layers.${i}.self_attn.q_proj`, this.w[`${p}.self_attn.q_proj.bias`]);
-      let k = this.proj(normed, `${p}.self_attn.k_proj.weight`, `layers.${i}.self_attn.k_proj`, this.w[`${p}.self_attn.k_proj.bias`]);
-      let v = this.proj(normed, `${p}.self_attn.v_proj.weight`, `layers.${i}.self_attn.v_proj`, this.w[`${p}.self_attn.v_proj.bias`]);
+      let q = this.proj(
+        normed,
+        `${p}.self_attn.q_proj.weight`,
+        `layers.${i}.self_attn.q_proj`,
+        this.w[`${p}.self_attn.q_proj.bias`],
+      );
+      let k = this.proj(
+        normed,
+        `${p}.self_attn.k_proj.weight`,
+        `layers.${i}.self_attn.k_proj`,
+        this.w[`${p}.self_attn.k_proj.bias`],
+      );
+      let v = this.proj(
+        normed,
+        `${p}.self_attn.v_proj.weight`,
+        `layers.${i}.self_attn.v_proj`,
+        this.w[`${p}.self_attn.v_proj.bias`],
+      );
 
       q = tf.transpose(tf.reshape(q, [B, T, numHeads, headDim]), [0, 2, 1, 3]);
       k = tf.transpose(tf.reshape(k, [B, T, numKVHeads, headDim]), [0, 2, 1, 3]);
@@ -157,7 +190,8 @@ export class QwenModel {
       q = this.applyRope(q, startPos, T);
       k = this.applyRope(k, startPos, T);
 
-      let kFull = k, vFull = v;
+      let kFull = k,
+        vFull = v;
       if (kvCache && kvCache.k) {
         kFull = tf.concat([kvCache.k, k], 2);
         vFull = tf.concat([kvCache.v, v], 2);
@@ -165,10 +199,21 @@ export class QwenModel {
 
       // GQA: repeat KV heads to match query heads
       const groups = numHeads / numKVHeads;
-      let kRep = kFull, vRep = vFull;
+      let kRep = kFull,
+        vRep = vFull;
       if (groups > 1) {
-        kRep = tf.reshape(tf.tile(tf.expandDims(kFull, 2), [1, 1, groups, 1, 1]), [B, numHeads, kFull.shape[2], headDim]);
-        vRep = tf.reshape(tf.tile(tf.expandDims(vFull, 2), [1, 1, groups, 1, 1]), [B, numHeads, vFull.shape[2], headDim]);
+        kRep = tf.reshape(tf.tile(tf.expandDims(kFull, 2), [1, 1, groups, 1, 1]), [
+          B,
+          numHeads,
+          kFull.shape[2],
+          headDim,
+        ]);
+        vRep = tf.reshape(tf.tile(tf.expandDims(vFull, 2), [1, 1, groups, 1, 1]), [
+          B,
+          numHeads,
+          vFull.shape[2],
+          headDim,
+        ]);
       }
 
       const scale = 1 / Math.sqrt(headDim);
@@ -179,7 +224,7 @@ export class QwenModel {
       // per-layer CPU->GPU mask upload is a big decode speedup.
       if (T > 1) scores = tf.add(scores, this._causalMask(T, kRep.shape[2], startPos));
       const attn = tf.softmax(scores, -1);
-      let ao = tf.matMul(attn, vRep);                       // [B,H,T,hd]
+      let ao = tf.matMul(attn, vRep); // [B,H,T,hd]
       ao = tf.reshape(tf.transpose(ao, [0, 2, 1, 3]), [B, T, numHeads * headDim]);
       const attnProj = this.proj(ao, `${p}.self_attn.o_proj.weight`, `layers.${i}.self_attn.o_proj`);
       const h = tf.add(hidden, attnProj);
@@ -201,16 +246,35 @@ export class QwenModel {
   /** Debug: layer-0 step by step, returns every intermediate (no tidy; leaks). */
   debugLayer0(hidden, startPos = 0) {
     const { numHeads, numKVHeads, headDim } = this.cfg;
-    const B = hidden.shape[0], T = hidden.shape[1]; const p = 'model.layers.0';
+    const B = hidden.shape[0],
+      T = hidden.shape[1];
+    const p = 'model.layers.0';
     const ln1 = this.rmsNorm(hidden, `${p}.input_layernorm.weight`);
-    let q = this.proj(ln1, `${p}.self_attn.q_proj.weight`, 'layers.0.self_attn.q_proj', this.w[`${p}.self_attn.q_proj.bias`]);
-    let k = this.proj(ln1, `${p}.self_attn.k_proj.weight`, 'layers.0.self_attn.k_proj', this.w[`${p}.self_attn.k_proj.bias`]);
-    let v = this.proj(ln1, `${p}.self_attn.v_proj.weight`, 'layers.0.self_attn.v_proj', this.w[`${p}.self_attn.v_proj.bias`]);
-    const qproj = q; const kproj = k;
+    let q = this.proj(
+      ln1,
+      `${p}.self_attn.q_proj.weight`,
+      'layers.0.self_attn.q_proj',
+      this.w[`${p}.self_attn.q_proj.bias`],
+    );
+    let k = this.proj(
+      ln1,
+      `${p}.self_attn.k_proj.weight`,
+      'layers.0.self_attn.k_proj',
+      this.w[`${p}.self_attn.k_proj.bias`],
+    );
+    let v = this.proj(
+      ln1,
+      `${p}.self_attn.v_proj.weight`,
+      'layers.0.self_attn.v_proj',
+      this.w[`${p}.self_attn.v_proj.bias`],
+    );
+    const qproj = q;
+    const kproj = k;
     q = tf.transpose(tf.reshape(q, [B, T, numHeads, headDim]), [0, 2, 1, 3]);
     k = tf.transpose(tf.reshape(k, [B, T, numKVHeads, headDim]), [0, 2, 1, 3]);
     v = tf.transpose(tf.reshape(v, [B, T, numKVHeads, headDim]), [0, 2, 1, 3]);
-    const qr = this.applyRope(q, startPos, T), kr = this.applyRope(k, startPos, T);
+    const qr = this.applyRope(q, startPos, T),
+      kr = this.applyRope(k, startPos, T);
     const groups = numHeads / numKVHeads;
     const kRep = tf.reshape(tf.tile(tf.expandDims(kr, 2), [1, 1, groups, 1, 1]), [B, numHeads, kr.shape[2], headDim]);
     const vRep = tf.reshape(tf.tile(tf.expandDims(v, 2), [1, 1, groups, 1, 1]), [B, numHeads, v.shape[2], headDim]);
@@ -218,7 +282,8 @@ export class QwenModel {
     let scores = tf.mul(tf.matMul(qr, kT, false, false), 1 / Math.sqrt(headDim));
     scores = tf.add(scores, this._causalMask(T, kRep.shape[2], startPos));
     const attn = tf.softmax(scores, -1);
-    let ao = tf.matMul(attn, vRep); ao = tf.reshape(tf.transpose(ao, [0, 2, 1, 3]), [B, T, numHeads * headDim]);
+    let ao = tf.matMul(attn, vRep);
+    ao = tf.reshape(tf.transpose(ao, [0, 2, 1, 3]), [B, T, numHeads * headDim]);
     const attnProj = this.proj(ao, `${p}.self_attn.o_proj.weight`, 'layers.0.self_attn.o_proj');
     const h = tf.add(hidden, attnProj);
     const ln2 = this.rmsNorm(h, `${p}.post_attention_layernorm.weight`);
@@ -256,7 +321,10 @@ export class QwenModel {
       if (hidden !== embeds) hidden.dispose();
       hidden = next;
       // free previous cache for this layer, keep the fresh one
-      if (kvCaches && kvCaches[i]) { kvCaches[i].k.dispose(); kvCaches[i].v.dispose(); }
+      if (kvCaches && kvCaches[i]) {
+        kvCaches[i].k.dispose();
+        kvCaches[i].v.dispose();
+      }
       newCaches[i] = this._newKV;
     }
     const logits = tf.tidy(() => {
@@ -277,6 +345,9 @@ export class QwenModel {
 
   disposeKV(kvCaches) {
     if (!kvCaches) return;
-    for (const kv of kvCaches) { kv?.k?.dispose(); kv?.v?.dispose(); }
+    for (const kv of kvCaches) {
+      kv?.k?.dispose();
+      kv?.v?.dispose();
+    }
   }
 }

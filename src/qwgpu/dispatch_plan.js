@@ -6,7 +6,7 @@ export function createDispatchPlan(schema) {
   return {
     embed: schema.embed,
     finalNorm: schema.finalNorm,
-    layers: schema.layers.map(layer => ({
+    layers: schema.layers.map((layer) => ({
       index: layer.index,
       inputNorm: layer.inputNorm.name,
       postAttentionNorm: layer.postAttentionNorm.name,

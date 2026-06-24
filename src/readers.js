@@ -30,11 +30,13 @@ export function fileReader(fileMap) {
   const pick = (path) => fileMap[path] || fileMap[path.split('/').pop()];
   return {
     async range(path, start, end) {
-      const f = pick(path); if (!f) throw new Error(`file not provided: ${path}`);
+      const f = pick(path);
+      if (!f) throw new Error(`file not provided: ${path}`);
       return await f.slice(start, end).arrayBuffer();
     },
     async text(path) {
-      const f = pick(path); if (!f) throw new Error(`file not provided: ${path}`);
+      const f = pick(path);
+      if (!f) throw new Error(`file not provided: ${path}`);
       return await f.text();
     },
   };

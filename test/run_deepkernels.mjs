@@ -1,8 +1,14 @@
 import { chromium } from 'playwright';
 import { existsSync } from 'node:fs';
-const CHROME = process.env.CHROME_PATH || (existsSync('/usr/local/bin/google-chrome') ? '/usr/local/bin/google-chrome' : '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary');
-const browser = await chromium.launch({ executablePath: CHROME, headless: false,
-  args: ['--enable-unsafe-webgpu','--enable-features=WebGPU','--use-angle=metal','--no-first-run'] });
+const macCanary = '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary';
+const linuxChrome = '/usr/local/bin/google-chrome';
+const winChrome = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
+const CHROME = process.env.CHROME_PATH || (existsSync(linuxChrome) ? linuxChrome : (existsSync(macCanary) ? macCanary : (existsSync(winChrome) ? winChrome : undefined)));
+const browser = await chromium.launch({ 
+  ...(CHROME ? { executablePath: CHROME } : {}), 
+  headless: false,
+  args: ['--enable-unsafe-webgpu', '--enable-features=WebGPU', '--no-first-run'] 
+});
 const page = await browser.newPage();
 const lines = [];
 page.on('console', m => { const t = m.text(); if (t.startsWith('VWG')) { lines.push(t); console.log(t); } });

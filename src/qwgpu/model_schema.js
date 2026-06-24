@@ -41,7 +41,10 @@ export function createQwenSchema(cfg) {
   const tensors = [];
   const layers = [];
 
-  const add = (d) => { tensors.push(d); return d; };
+  const add = (d) => {
+    tensors.push(d);
+    return d;
+  };
   const embed = add({ name: 'model.embed_tokens.weight', role: 'embedding', quant: 'int8', shape: [cfg.vocabSize, H] });
   const finalNorm = add(f32Desc('model.norm.weight', [H], 'final_norm'));
 
@@ -71,7 +74,7 @@ export function createQwenSchema(cfg) {
     layers.push(layer);
   }
 
-  const byName = new Map(tensors.map(t => [t.name, t]));
+  const byName = new Map(tensors.map((t) => [t.name, t]));
   const expectedNames = new Set(byName.keys());
 
   return {
@@ -82,7 +85,7 @@ export function createQwenSchema(cfg) {
     layers,
     embed,
     finalNorm,
-    projectionDescs: tensors.filter(t => t.role === 'projection'),
+    projectionDescs: tensors.filter((t) => t.role === 'projection'),
     validateTensor(name, shape) {
       const desc = byName.get(name);
       if (!desc) return null;

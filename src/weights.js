@@ -15,14 +15,19 @@ function decodeF16ToF32(u8, numel) {
   const u16 = new Uint16Array(u8.buffer, u8.byteOffset, numel);
   const out = new Float32Array(numel);
   for (let i = 0; i < numel; i++) {
-    const h = u16[i], s = (h & 0x8000) >> 15, e = (h & 0x7c00) >> 10, f = h & 0x03ff;
+    const h = u16[i],
+      s = (h & 0x8000) >> 15,
+      e = (h & 0x7c00) >> 10,
+      f = h & 0x03ff;
     if (e === 0) out[i] = (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
-    else if (e === 0x1f) out[i] = f ? NaN : (s ? -Infinity : Infinity);
+    else if (e === 0x1f) out[i] = f ? NaN : s ? -Infinity : Infinity;
     else out[i] = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
   }
   return out;
 }
-function decodeF32(u8, numel) { return new Float32Array(u8.buffer.slice(u8.byteOffset, u8.byteOffset + numel * 4)); }
+function decodeF32(u8, numel) {
+  return new Float32Array(u8.buffer.slice(u8.byteOffset, u8.byteOffset + numel * 4));
+}
 const DECODERS = { BF16: decodeBf16ToF32, F16: decodeF16ToF32, FP16: decodeF16ToF32, F32: decodeF32, FP32: decodeF32 };
 
 /**
@@ -35,7 +40,9 @@ export async function loadModelWeights(reader, onProgress = () => {}) {
   try {
     const idx = JSON.parse(await reader.text('model.safetensors.index.json'));
     shards = [...new Set(Object.values(idx.weight_map))];
-  } catch { shards = ['model.safetensors']; }
+  } catch {
+    shards = ['model.safetensors'];
+  }
 
   const weights = {};
   for (const shard of shards) {
@@ -44,7 +51,7 @@ export async function loadModelWeights(reader, onProgress = () => {}) {
     const hdrBuf = await reader.range(shard, 8, 8 + headerLen);
     const header = JSON.parse(new TextDecoder().decode(new Uint8Array(hdrBuf)));
     const dataStart = 8 + headerLen;
-    const names = Object.keys(header).filter(k => k !== '__metadata__');
+    const names = Object.keys(header).filter((k) => k !== '__metadata__');
     let done = 0;
     for (const name of names) {
       const t = header[name];
@@ -57,7 +64,10 @@ export async function loadModelWeights(reader, onProgress = () => {}) {
       const f32 = dec(new Uint8Array(buf), numel);
       weights[name] = tf.tensor(f32, t.shape, 'float32');
       done++;
-      if (done % 8 === 0) { onProgress(`${shard} ${done}/${names.length}`, done / names.length); await tf.nextFrame?.(); }
+      if (done % 8 === 0) {
+        onProgress(`${shard} ${done}/${names.length}`, done / names.length);
+        await tf.nextFrame?.();
+      }
     }
   }
   onProgress('weights loaded', 1);
