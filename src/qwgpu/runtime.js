@@ -500,7 +500,7 @@ export class QwenWGPU {
   _bgCached(pipe, buffers, key, opts) {
     return this.pool.cachedBindGroup(pipe, buffers, key, opts);
   }
-  _dispatch(enc, pipe, bg, gx, gy = 1, cat) {
+  _dispatch(enc, pipe, bg, gx, gy = 1, cat, imm = null) {
     this.lastDispatchCount++;
     let ts;
     if (this.prof && this.prof.idx < this.prof.cap) {
@@ -510,7 +510,8 @@ export class QwenWGPU {
     }
     const p = enc.beginComputePass(ts ? { timestampWrites: ts } : undefined);
     p.setPipeline(pipe);
-    p.setBindGroup(0, bg);
+    if (bg) p.setBindGroup(0, bg);
+    if (imm) p.setImmediates(0, imm);
     p.dispatchWorkgroups(gx, gy);
     p.end();
   }
@@ -1007,9 +1008,9 @@ export class QwenWGPU {
     this.pam.ensureBlocks(0, pos + 1);
     const btArr = this.pam.getBlockTableArray(0);
     this.dev.queue.writeBuffer(this.s.blockTableBuf, 0, btArr);
-    const meta = this._uni(new Uint32Array([pos, 0, this.pam.maxBlocksPerSeq, kvd]));
-    const bg = this._bg(this.pipes.writeKvPage, [kBuf, vBuf, kcBuf, vcBuf, this.s.blockTableBuf, meta]);
-    this._dispatch(enc, this.pipes.writeKvPage, bg, Math.ceil(kvd / 256), 1, 'writeKvPage');
+    const meta = new Uint32Array([pos, 0, this.pam.maxBlocksPerSeq, kvd]);
+    const bg = this._bg(this.pipes.writeKvPage, [kBuf, vBuf, kcBuf, vcBuf, this.s.blockTableBuf]);
+    this._dispatch(enc, this.pipes.writeKvPage, bg, Math.ceil(kvd / 256), 1, 'writeKvPage', meta);
   }
 
   writeKvPageBatch(enc, kBuf, vBuf, kcBuf, vcBuf, T, off, layerIndex) {
@@ -1018,9 +1019,9 @@ export class QwenWGPU {
     this.pam.ensureBlocks(0, off + T);
     const btArr = this.pam.getBlockTableArray(0);
     this.dev.queue.writeBuffer(this.s.blockTableBuf, 0, btArr);
-    const meta = this._uni(new Uint32Array([T, 0, this.pam.maxBlocksPerSeq, kvd, off]));
-    const bg = this._bg(this.pipes.writeKvPageBatch, [kBuf, vBuf, kcBuf, vcBuf, this.s.blockTableBuf, meta]);
-    this._dispatch(enc, this.pipes.writeKvPageBatch, bg, Math.ceil((T * kvd) / 256), 1, 'writeKvPageBatch');
+    const meta = new Uint32Array([T, 0, this.pam.maxBlocksPerSeq, kvd, off]);
+    const bg = this._bg(this.pipes.writeKvPageBatch, [kBuf, vBuf, kcBuf, vcBuf, this.s.blockTableBuf]);
+    this._dispatch(enc, this.pipes.writeKvPageBatch, bg, Math.ceil((T * kvd) / 256), 1, 'writeKvPageBatch', meta);
   }
 
   attnPaged(enc, qBuf, kc, vc, oBuf, ctx) {
@@ -1113,12 +1114,13 @@ export class QwenWGPU {
     const vPairs = packed.vN / 2;
     const totalPairs = qPairs + kPairs + vPairs;
     const gx = Math.min(totalPairs, 65535);
-    const meta = this._staticUni(
-      `fusedQkvRope:${packed.K}:${totalPairs}:${qPairs}:${kPairs}:${vPairs}:${packed.gpr}`,
-      new Uint32Array([packed.K, totalPairs, qPairs, kPairs, vPairs, packed.gpr, gx, pos, this.cfg.headDim]),
-      new Float32Array([this.cfg.rmsNormEps, packed.qN, packed.kN]),
+    const meta = this._uni(
+      new Uint32Array([
+        packed.K, totalPairs, qPairs, kPairs, vPairs, packed.gpr, gx, pos, this.cfg.headDim,
+        ...new Uint32Array(new Float32Array([this.cfg.rmsNormEps, packed.qN, packed.kN]).buffer)
+      ])
     );
-    const bg = this._bgCached(
+    const bg = this._bg(
       this.pipes.rmsNormQkvRope,
       [
         hiddenBuf,
@@ -1132,9 +1134,7 @@ export class QwenWGPU {
         kBuf,
         vBuf,
         meta,
-      ],
-      `fusedQkv:${L.index}`,
-      { sensitive: false },
+      ]
     );
     this._dispatch(
       enc,
@@ -1209,11 +1209,11 @@ export class QwenWGPU {
         xBuf,
         this.ropeCos,
         this.ropeSin,
-        this._uni(new Uint32Array([nHeads, this.cfg.headDim, pos])),
       ]),
       Math.ceil((nHeads * (this.cfg.headDim / 2)) / 256),
       1,
       'rope',
+      new Uint32Array([nHeads, this.cfg.headDim, pos])
     );
   }
   ropeQK(enc, qBuf, kBuf, pos) {
@@ -1227,11 +1227,11 @@ export class QwenWGPU {
         kBuf,
         this.ropeCos,
         this.ropeSin,
-        this._uni(new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, pos])),
       ]),
       Math.ceil(pairs / 256),
       1,
       'ropeQK',
+      new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, pos])
     );
   }
   attn(enc, qBuf, kc, vc, oBuf, ctx) {
@@ -1246,19 +1246,18 @@ export class QwenWGPU {
       S.pm,
       S.pz,
       S.po,
-      this._uni(new Uint32Array([c.numHeads, c.numKVHeads, ctx, c.headDim])),
-      this._uni(new Uint32Array([nsplit, this.CHUNK])),
     ]);
-    this._dispatch(enc, this.pipes.attnP, bgP, c.numHeads, nsplit, 'attnP');
+    const immP = new Uint32Array([c.numHeads, c.numKVHeads, ctx, c.headDim, nsplit, this.CHUNK]);
+    this._dispatch(enc, this.pipes.attnP, bgP, c.numHeads, nsplit, 'attnP', immP);
     // pass 2: combine splits per head → o
     const bgC = this._bg(this.pipes.attnC, [
       S.pm,
       S.pz,
       S.po,
       oBuf,
-      this._uni(new Uint32Array([c.numHeads, c.headDim, nsplit, 0])),
     ]);
-    this._dispatch(enc, this.pipes.attnC, bgC, c.numHeads, 1, 'attnC');
+    const immC = new Uint32Array([c.numHeads, c.headDim, nsplit, 0]);
+    this._dispatch(enc, this.pipes.attnC, bgC, c.numHeads, 1, 'attnC', immC);
   }
 
   // Decode one token at absolute position `pos`. Writes logits to s.logits. Returns nothing.

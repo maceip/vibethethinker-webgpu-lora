@@ -139,10 +139,11 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
 // owns one (lo, hi) PAIR — reads both, then writes both. No cross-thread r/w race
 // (in-place rotation needs the original of both halves).
 export const ROPE = `
+requires immediate_address_space;
 @group(0) @binding(0) var<storage,read_write> x: array<f32>;
 @group(0) @binding(1) var<storage,read> cosT: array<f32>;
 @group(0) @binding(2) var<storage,read> sinT: array<f32>;
-@group(0) @binding(3) var<uniform> m: vec3<u32>;             // nHeads, headDim, pos
+var<immediate> m: vec3<u32>;             // nHeads, headDim, pos
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let g = gid.x; let H = m.x; let D = m.y; let pos = m.z; let half = D/2u;
@@ -158,11 +159,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 // Combined decode RoPE for Q and K in one dispatch. Qwen layout is
 // [head][headDim] with the low/high half rotation at the absolute token position.
 export const ROPE_QK = `
+requires immediate_address_space;
 @group(0) @binding(0) var<storage,read_write> q: array<f32>;
 @group(0) @binding(1) var<storage,read_write> k: array<f32>;
 @group(0) @binding(2) var<storage,read> cosT: array<f32>;
 @group(0) @binding(3) var<storage,read> sinT: array<f32>;
-@group(0) @binding(4) var<uniform> m: vec4<u32>;             // qHeads, kvHeads, headDim, pos
+var<immediate> m: vec4<u32>;             // qHeads, kvHeads, headDim, pos
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let g = gid.x; let qH = m.x; let kH = m.y; let D = m.z; let pos = m.w; let half = D/2u;
@@ -189,22 +191,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 // unnormalized weighted-V); ATTN_COMBINE merges the splits per head.
 // CHUNK = 128 positions/split (must match runtime). q [nHeads,hd], KV [ctx][nKV][hd].
 export const ATTN_PARTIAL = `
+requires immediate_address_space;
 enable subgroups;
+struct AttnP { nHeads: u32, nKV: u32, ctx: u32, hd: u32, nsplit: u32, chunk: u32 };
 @group(0) @binding(0) var<storage,read> q: array<f32>;
 @group(0) @binding(1) var<storage,read> kc: array<f32>;
 @group(0) @binding(2) var<storage,read> vc: array<f32>;
 @group(0) @binding(3) var<storage,read_write> pm: array<f32>;  // [nHeads*nsplit] per-split max
 @group(0) @binding(4) var<storage,read_write> pz: array<f32>;  // [nHeads*nsplit] per-split sum
 @group(0) @binding(5) var<storage,read_write> po: array<f32>;  // [nHeads*nsplit*hd] unnorm weighted V
-@group(0) @binding(6) var<uniform> m: vec4<u32>;               // nHeads, nKV, ctx, hd
-@group(0) @binding(7) var<uniform> m2: vec2<u32>;              // nsplit, chunk
+var<immediate> m: AttnP;
 var<workgroup> sc: array<f32,128>;
 var<workgroup> red: array<f32,32>;
 @compute @workgroup_size(128)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
   let h = wid.x; let s = wid.y; let tid = lid.x;
-  let nHeads = m.x; let nKV = m.y; let ctx = m.z; let hd = m.w; let nsplit = m2.x; let chunk = m2.y;
+  let nHeads = m.nHeads; let nKV = m.nKV; let ctx = m.ctx; let hd = m.hd; let nsplit = m.nsplit; let chunk = m.chunk;
   let kvh = h / (nHeads / nKV);
   let qbase = h*hd; let stride = nKV*hd; let hoff = kvh*hd; let scale = 1.0/sqrt(f32(hd));
   let nsg = (128u + sgsz - 1u) / sgsz;
@@ -230,11 +233,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 
 // Combine split partials per head via online softmax → final o[nHeads*hd].
 export const ATTN_COMBINE = `
+requires immediate_address_space;
 @group(0) @binding(0) var<storage,read> pm: array<f32>;
 @group(0) @binding(1) var<storage,read> pz: array<f32>;
 @group(0) @binding(2) var<storage,read> po: array<f32>;
 @group(0) @binding(3) var<storage,read_write> o: array<f32>;
-@group(0) @binding(4) var<uniform> m: vec4<u32>;   // nHeads, hd, nsplit, _
+var<immediate> m: vec4<u32>;   // nHeads, hd, nsplit, _
 @compute @workgroup_size(128)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let h = wid.x; let tid = lid.x; let hd = m.y; let nsplit = m.z; let base = h*nsplit;
@@ -1444,12 +1448,13 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 // ---- Paged Attention write-back and attention kernels ----
 
 export const WRITE_KV_PAGE = `
+requires immediate_address_space;
 @group(0) @binding(0) var<storage,read> k_src: array<f32>;
 @group(0) @binding(1) var<storage,read> v_src: array<f32>;
 @group(0) @binding(2) var<storage,read_write> kc: array<f32>;
 @group(0) @binding(3) var<storage,read_write> vc: array<f32>;
 @group(0) @binding(4) var<storage,read> block_table: array<u32>;
-@group(0) @binding(5) var<uniform> m: vec4<u32>; // pos, seq_id, max_blocks, kvd
+var<immediate> m: vec4<u32>; // pos, seq_id, max_blocks, kvd
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let idx = gid.x; let pos = m.x; let seq_id = m.y; let max_blocks = m.z; let kvd = m.w;
@@ -1464,13 +1469,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 export const WRITE_KV_PAGE_BATCH = `
+requires immediate_address_space;
 struct KVBatchMeta { T:u32, seq_id:u32, max_blocks:u32, kvd:u32, off:u32 };
 @group(0) @binding(0) var<storage,read> k_src: array<f32>;
 @group(0) @binding(1) var<storage,read> v_src: array<f32>;
 @group(0) @binding(2) var<storage,read_write> kc: array<f32>;
 @group(0) @binding(3) var<storage,read_write> vc: array<f32>;
 @group(0) @binding(4) var<storage,read> block_table: array<u32>;
-@group(0) @binding(5) var<uniform> m: KVBatchMeta;
+var<immediate> m: KVBatchMeta;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let idx = gid.x; let T = m.T; let seq_id = m.seq_id; let max_blocks = m.max_blocks; let kvd = m.kvd; let off = m.off;
@@ -1704,6 +1710,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 `;
 export const GEMV4_QKV_ROPE_RMS = `
 enable subgroups;
+requires immediate_address_space;
 struct Meta { 
   K: u32, totalPairs: u32, qPairs: u32, kPairs: u32, vPairs: u32, gpr: u32, gridX: u32, 
   pos: u32, headDim: u32, eps: f32,
@@ -1720,7 +1727,7 @@ struct Meta {
 @group(0) @binding(7) var<storage,read_write> qOut: array<f32>;  
 @group(0) @binding(8) var<storage,read_write> kOut: array<f32>;  
 @group(0) @binding(9) var<storage,read_write> vOut: array<f32>;  
-@group(0) @binding(10) var<uniform> m: Meta;
+var<immediate> m: Meta;
 
 var<workgroup> partSum: array<f32, 64>;
 
