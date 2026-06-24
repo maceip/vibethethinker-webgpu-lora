@@ -14,6 +14,7 @@ import {
   LORA_B_ADD,
   LORA_B_ADD_T,
   RMSNORM,
+  RMSNORM_F16,
   ROPE,
   ROPE_QK,
   ATTN_PARTIAL,
@@ -196,6 +197,7 @@ export class QwenWGPU {
       loraBAdd: this._pipe(LORA_B_ADD, 'loraBAdd'),
       loraBAddT: this._pipe(LORA_B_ADD_T, 'loraBAddT'),
       rms: this._pipe(RMSNORM, 'rms'),
+      rmsF16: hasF16 ? this._pipe(RMSNORM_F16, 'rmsF16') : null,
       rope: this._pipe(ROPE, 'rope'),
       ropeQK: this._pipe(ROPE_QK, 'ropeQK'),
       attnP: this._pipe(ATTN_PARTIAL, 'attnP'),
@@ -237,7 +239,7 @@ export class QwenWGPU {
 
     if (hasF16) {
       this.setUseF16(true);
-      onProgress('f16 compute enabled (add/silu paths)', 0);
+      onProgress('f16 compute enabled (add/silu/rms paths)', 0);
     }
 
     onProgress('streaming + quantizing weights', 0);
@@ -1198,7 +1200,10 @@ export class QwenWGPU {
   }
   rms(enc, xBuf, gBuf, yBuf, K) {
     const imm = new Float32Array([K, this.cfg.rmsNormEps]);
-    this._dispatch(enc, this.pipes.rms, this._bgCached(this.pipes.rms, [xBuf, gBuf, yBuf], `rms:${K}`), 1, 1, 'rms', imm);
+    const useF16 = this.usingF16() && this.pipes.rmsF16;
+    const pipe = useF16 ? this.pipes.rmsF16 : this.pipes.rms;
+    const key = `rms:${K}${useF16 ? ':f16' : ''}`;
+    this._dispatch(enc, pipe, this._bgCached(pipe, [xBuf, gBuf, yBuf], key), 1, 1, useF16 ? 'rmsF16' : 'rms', imm);
   }
   rope(enc, xBuf, pos, nHeads) {
     this._dispatch(

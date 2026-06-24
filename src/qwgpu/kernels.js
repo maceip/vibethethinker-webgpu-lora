@@ -143,6 +143,27 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   for (var k = tid; k < K; k = k + 256u) { y[k] = x[k]*inv*g[k]; }
 }`;
 
+// RMSNorm f16 math variant (storage f32 for engine compatibility).
+// Uses f16 for sum, rsqrt and multiply to reduce precision pressure / improve throughput on supported GPUs.
+export const RMSNORM_F16 = `
+requires immediate_address_space;
+enable f16;
+@group(0) @binding(0) var<storage,read> x: array<f32>;
+@group(0) @binding(1) var<storage,read> g: array<f32>;
+@group(0) @binding(2) var<storage,read_write> y: array<f32>;
+var<immediate> m: vec2<f32>;   // K, eps
+var<workgroup> part: array<f16,256>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let tid = lid.x; let K = u32(m.x);
+  var s = 0.0h;
+  for (var k = tid; k < K; k = k + 256u) { let v = f16(x[k]); s = s + v*v; }
+  part[tid] = s; workgroupBarrier();
+  for (var t = 128u; t > 0u; t = t/2u) { if (tid < t) { part[tid] = part[tid] + part[tid+t]; } workgroupBarrier(); }
+  let inv = inverseSqrt(part[0]/f16(m.x) + f16(m.y));
+  for (var k = tid; k < K; k = k + 256u) { y[k] = f32( f16(x[k]) * inv * f16(g[k]) ); }
+}`;
+
 // RoPE on a single row reshaped [nHeads, headDim] for position pos. Each thread
 // owns one (lo, hi) PAIR — reads both, then writes both. No cross-thread r/w race
 // (in-place rotation needs the original of both halves).

@@ -256,6 +256,16 @@ Continue deeper cleanup (remaining GEMM/W4A8 prefill, lora uniforms, more fusion
 
 Continuing linearly into deeper f16 kernels + accuracy harness + Phase 4 overrides.
 
+**Latest linear step:**
+- Added RMSNORM_F16 (enable f16 + f16 math for sum/rsqrt/scale).
+- Conditional `rmsF16` pipeline created when shader-f16 available.
+- `rms()` now selects f16 path when usingF16() (mirrors add/silu behavior).
+- Auto-enable now mentions rms path.
+- Phase 3 f16 coverage expanded to another very hot per-token kernel (RMSNorm appears in every layer, twice in decode).
+- var<uniform> remains 0. _uni count low.
+
+Next linear: more f16 kernels (RoPE math, attention score/softmax/V, GEMV4 accum if safe), f16-vs-f32 harness, Phase 4 overrides.
+
 ---
 
 *This document is the single source of truth for the optimization effort.*
