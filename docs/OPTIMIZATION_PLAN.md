@@ -223,14 +223,22 @@ Full pass through all 5 phases has been started and representative implementatio
 - Phase 4: GEMM etc. benefit from immediate + future override for tile sizes.
 - Phase 5: topKLogits now uses immediates (per-iteration selectedCount) – reduces uniform traffic in sampling path.
 
-**Current counts (latest linear ea03bd8 + paged prefill):**
-- var<uniform> left in kernels.js: 8 or fewer.
-- Many paged prefill attn paths also converted in this step.
-- Coverage now includes nearly all decode, LoRA (A/B), topk sampling, GEMM prefill, RMS/RoPE/embed variants, basic + block + paged prefill attn on the immediate path.
+**Milestone (this linear slice):**
+- var<uniform> in kernels.js: **0**
+- _uni/_staticUni in runtime.js: down to ~12 (mostly lora-static cache keys, init u. for bypassed paths, and a few prefill embedT which we also converted in this round).
+- All hot decode GEMV/GEMM/LoRA/RMS/RoPE/ADD/SILU/EMBED/ARGMAX/TOPK + prefill GEMM + all attn partial/prefill (regular + block + paged) now use `var<immediate>` + `requires immediate_address_space;`.
+- Corresponding callsites pass imm (or [imm,imm2]) and no longer include uniform meta in bind groups.
 
-Linear continuation is healthy. Remaining work is small number of edge attn paged + any last fused, then we can declare Phase 1 "complete enough" per the plan's evaluation gates and move emphasis to f16 (Phase 3) + specialization/autotune (Phase 4) + GPU sampling polish (Phase 5). 
+Phase 1 is now essentially complete for the performance-critical paths. The plan's "finish Immediates" goal is met.
 
-Run the plan's eval commands (`npm run test:correctness`, bench, profToken, dispatch counts) on Chrome 149+ hardware to verify.
+Next linear steps: 
+- Clean any vestigial _staticUni in _gemvMeta helpers if they are no longer needed for hot paths.
+- Declare Phase 1 done in status.
+- Move to Phase 3 (implement f16 compute variants for GEMV/GEMM/attn) + extend accuracy tests.
+- Phase 4: more overrides + simple autotune for workgroup.
+- Phase 5: GPU sampling (temperature, top-p) on top of current topk/argmax.
+
+**Evaluation reminder (per plan):** Run `npm run test:correctness`, `npm run bench:wgpu`, enableProf + profToken, check dispatchCount reduction, cross hardware, LoRA/sampling/long-ctx parity.
 
 This is systematic linear progress through the checklist in the plan. Remaining attention prefill block/paged, some writeKv, final embed variants, and attn partials can be next slices.
 

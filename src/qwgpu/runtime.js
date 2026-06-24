@@ -1039,31 +1039,32 @@ export class QwenWGPU {
       S.pz,
       S.po,
       S.blockTableBuf,
-      this._uni(new Uint32Array([c.numHeads, c.numKVHeads, ctx, c.headDim])),
-      this._uni(new Uint32Array([nsplit, this.CHUNK, 0, this.pam.maxBlocksPerSeq])),
     ]);
-    this._dispatch(enc, this.pipes.attnPartialPaged, bgP, c.numHeads, nsplit, 'attnP_paged');
+    const immP = new Uint32Array([c.numHeads, c.numKVHeads, ctx, c.headDim]);
+    const immP2 = new Uint32Array([nsplit, this.CHUNK, 0, this.pam.maxBlocksPerSeq]);
+    this._dispatch(enc, this.pipes.attnPartialPaged, bgP, c.numHeads, nsplit, 'attnP_paged', [immP, immP2]);
     const bgC = this._bg(this.pipes.attnC, [
       S.pm,
       S.pz,
       S.po,
       oBuf,
-      this._uni(new Uint32Array([c.numHeads, c.headDim, nsplit, 0])),
     ]);
-    this._dispatch(enc, this.pipes.attnC, bgC, c.numHeads, 1, 'attnC');
+    const immC = new Uint32Array([c.numHeads, c.headDim, nsplit, 0]);
+    this._dispatch(enc, this.pipes.attnC, bgC, c.numHeads, 1, 'attnC', immC);
   }
 
   attnPrefillPaged(enc, qBuf, kc, vc, oBuf, T, qStart = 0, ctx = T) {
     const c = this.cfg;
     if (this.features.prefillAttention === 'block' || qStart !== 0 || ctx !== T) {
-      const meta = new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, T, qStart, ctx, 0, this.pam.maxBlocksPerSeq]);
+      const imm = new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, T, qStart, ctx, 0, this.pam.maxBlocksPerSeq]);
       this._dispatch(
         enc,
         this.pipes.attnPrefillBlockPaged,
-        this._bg(this.pipes.attnPrefillBlockPaged, [qBuf, kc, vc, oBuf, this.s.blockTableBuf, this._uni(meta)]),
+        this._bg(this.pipes.attnPrefillBlockPaged, [qBuf, kc, vc, oBuf, this.s.blockTableBuf]),
         c.numHeads,
         Math.ceil(T / 4),
         'attnPrefillBlockPaged',
+        imm,
       );
     } else {
       const imm1 = new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, T]);
@@ -1649,14 +1650,15 @@ export class QwenWGPU {
     this.dev.queue.writeBuffer(ST.ids, 0, new Uint32Array(ids));
     const enc = this.dev.createCommandEncoder();
     const e = this.q[this.plan.embed.name];
-    const embedUni = this._uni(new Uint32Array([T, H, 0, 0]));
+    const imm = new Uint32Array([T, H, 0, 0]);
     this._dispatch(
       enc,
       this.pipes.embedT,
-      this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, embedUni]),
+      this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids]),
       Math.min(Math.ceil((T * H) / 256), 65535),
       1,
       'embedT',
+      imm,
     );
     for (let i = 0; i < c.numLayers; i++) {
       const L = this.plan.layers[i];
@@ -1798,10 +1800,11 @@ export class QwenWGPU {
       this._dispatch(
         enc,
         this.pipes.embedT,
-        this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, this._uni(new Uint32Array([CT, H, off, 0]))]),
+        this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids]),
         Math.min(Math.ceil((CT * H) / 256), 65535),
         1,
         'embedT',
+        new Uint32Array([CT, H, off, 0]),
       );
       for (let i = 0; i < c.numLayers; i++) {
         const L = this.plan.layers[i];
@@ -1969,15 +1972,16 @@ export class QwenWGPU {
 
       const enc = this.dev.createCommandEncoder();
       const e = this.q[this.plan.embed.name];
-      const embedUni = this._uni(new Uint32Array([T, H, 0, 0]));
+      const embedUni = new Uint32Array([T, H, 0, 0]);
 
       this._dispatch(
         enc,
         this.pipes.embedT,
-        this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids, embedUni]),
+        this._bg(this.pipes.embedT, [e.w, e.scale, ST.hidden, ST.ids]),
         Math.min(Math.ceil((T * H) / 256), 65535),
         1,
         'embedT',
+        embedUni,
       );
       for (let i = 0; i < c.numLayers; i++) {
         const L = this.plan.layers[i];

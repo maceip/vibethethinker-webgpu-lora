@@ -1245,7 +1245,7 @@ struct Meta { K:u32, N:u32, T:u32, gpr:u32, hasBias:u32, p0:u32, p1:u32, p2:u32 
 @group(0) @binding(3) var<storage,read> scale: array<f32>;
 @group(0) @binding(4) var<storage,read> bias: array<f32>;
 @group(0) @binding(5) var<storage,read_write> Y: array<f32>;
-@group(0) @binding(6) var<uniform> m: Meta;
+var<immediate> m: Meta;
 
 ${
   hasDP4a
@@ -1318,7 +1318,7 @@ struct Meta { K:u32, N:u32, T:u32, gpr:u32, hasBias:u32, p0:u32, p1:u32, p2:u32 
 @group(0) @binding(3) var<storage,read> scale: array<f32>;
 @group(0) @binding(4) var<storage,read> bias: array<f32>;
 @group(0) @binding(5) var<storage,read_write> Y: array<f32>;
-@group(0) @binding(6) var<uniform> m: Meta;
+var<immediate> m: Meta;
 
 ${
   hasDP4a
@@ -1399,7 +1399,7 @@ struct Meta { K:u32, totalN:u32, qN:u32, kN:u32, vN:u32, gpr:u32, pos:u32, eps:f
 @group(0) @binding(8) var<storage,read_write> kOut: array<f32>;
 @group(0) @binding(9) var<storage,read_write> vOut: array<f32>;
 @group(0) @binding(10) var<storage,read_write> normedOut: array<f32>;
-@group(0) @binding(11) var<uniform> m: Meta;
+var<immediate> m: Meta;
 
 var<workgroup> As: array<f32, 2048>;
 var<workgroup> part: array<f32, 128>;
@@ -1528,6 +1528,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 export const ATTN_PARTIAL_PAGED = `
 enable subgroups;
+requires immediate_address_space;
 @group(0) @binding(0) var<storage,read> q: array<f32>;
 @group(0) @binding(1) var<storage,read> kc: array<f32>;
 @group(0) @binding(2) var<storage,read> vc: array<f32>;
@@ -1535,8 +1536,8 @@ enable subgroups;
 @group(0) @binding(4) var<storage,read_write> pz: array<f32>;
 @group(0) @binding(5) var<storage,read_write> po: array<f32>;
 @group(0) @binding(6) var<storage,read> block_table: array<u32>;
-@group(0) @binding(7) var<uniform> m: vec4<u32>;               // nHeads, nKV, ctx, hd
-@group(0) @binding(8) var<uniform> m2: vec4<u32>;              // nsplit, chunk, seq_id, max_blocks
+var<immediate> m: vec4<u32>;               // nHeads, nKV, ctx, hd
+var<immediate> m2: vec4<u32>;              // nsplit, chunk, seq_id, max_blocks
 var<workgroup> sc: array<f32,128>;
 var<workgroup> red: array<f32,32>;
 @compute @workgroup_size(128)
@@ -1591,8 +1592,8 @@ requires immediate_address_space;
 @group(0) @binding(2) var<storage,read> vc: array<f32>;
 @group(0) @binding(3) var<storage,read_write> o: array<f32>;
 @group(0) @binding(4) var<storage,read> block_table: array<u32>;
-@group(0) @binding(5) var<uniform> m: vec4<u32>;             // nHeads, nKV, hd, T
-@group(0) @binding(6) var<uniform> m2: vec2<u32>;            // seq_id, max_blocks
+var<immediate> m: vec4<u32>;             // nHeads, nKV, hd, T
+var<immediate> m2: vec2<u32>;            // seq_id, max_blocks
 var<workgroup> ps: array<f32,256>;
 var<workgroup> acc: array<f32,128>;
 var<workgroup> red: array<f32,64>;
@@ -1651,13 +1652,14 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 
 export const ATTN_PREFILL_BLOCK_PAGED = `
 enable subgroups;
+requires immediate_address_space;
 struct Meta { nHeads:u32, nKV:u32, hd:u32, T:u32, qStart:u32, ctx:u32, seq_id:u32, max_blocks:u32 };
 @group(0) @binding(0) var<storage,read> q: array<f32>;
 @group(0) @binding(1) var<storage,read> kc: array<f32>;
 @group(0) @binding(2) var<storage,read> vc: array<f32>;
 @group(0) @binding(3) var<storage,read_write> o: array<f32>;
 @group(0) @binding(4) var<storage,read> block_table: array<u32>;
-@group(0) @binding(5) var<uniform> m: Meta;
+var<immediate> m: Meta;
 const BQ = 4u; const BK = 128u;
 var<workgroup> ps: array<f32, 512>;
 var<workgroup> acc: array<f32, 512>;
