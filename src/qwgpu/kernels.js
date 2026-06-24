@@ -8,6 +8,8 @@
 // K-reduction (coalesced). LoRA: d[r] = sum_k x[k]*A[k,r]; y += sum_r d[r]*B[r,n].
 export const GEMV = `
 enable subgroups;
+requires immediate_address_space;
+requires subgroup_id;
 struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scaleLo:f32, gpr:u32 };
 @group(0) @binding(0) var<storage,read> x: array<f32>;
 @group(0) @binding(1) var<storage,read> w: array<u32>;       // [N][K/4] int8
@@ -16,11 +18,12 @@ struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scale
 @group(0) @binding(4) var<storage,read> loraD: array<f32>;   // [rank] precomputed x@A (or dummy)
 @group(0) @binding(5) var<storage,read> loraB: array<f32>;   // [rank][N] (or dummy)
 @group(0) @binding(6) var<storage,read_write> y: array<f32>; // [N]
-@group(0) @binding(7) var<uniform> m: Meta;
+var<immediate> m: Meta;
 var<workgroup> part: array<f32,64>;       // one slot per subgroup
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32) {
+        @builtin(subgroup_size) sgsz: u32, @builtin(subgroup_invocation_id) sgid: u32,
+        @builtin(subgroup_id) sgroup: u32) {
   let n = wid.x + wid.y * m.gridX; let tid = lid.x;
   if (n >= m.N) { return; }               // workgroup-uniform: whole group exits together
   let K4 = m.K/4u; let rb = n*K4;
@@ -120,10 +123,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // RMSNorm: y = x * rsqrt(mean(x^2)+eps) * g   (single row, K elements)
 export const RMSNORM = `
+requires immediate_address_space;
 @group(0) @binding(0) var<storage,read> x: array<f32>;
 @group(0) @binding(1) var<storage,read> g: array<f32>;
 @group(0) @binding(2) var<storage,read_write> y: array<f32>;
-@group(0) @binding(3) var<uniform> m: vec2<f32>;   // K, eps
+var<immediate> m: vec2<f32>;   // K, eps
 var<workgroup> part: array<f32,256>;
 @compute @workgroup_size(256)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
@@ -346,20 +350,23 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 // y += a (elementwise). Grid-stride so it covers any n with a dispatch capped at the
 // 65535-workgroup limit (n reaches T*H ~ 16.7M during prefill).
 export const ADD = `
+requires immediate_address_space;
+requires linear_indexing;
 @group(0) @binding(0) var<storage,read> a: array<f32>;
 @group(0) @binding(1) var<storage,read_write> y: array<f32>;
-@group(0) @binding(2) var<uniform> n: u32;
+var<immediate> n: u32;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+fn main(@builtin(global_invocation_index) gid: u32, @builtin(num_workgroups) nwg: vec3<u32>) {
   let stride = nwg.x * 256u;
-  for (var i = g.x; i < n; i = i + stride) { y[i] = y[i] + a[i]; }
+  for (var i = gid; i < n; i = i + stride) { y[i] = y[i] + a[i]; }
 }`;
 
 // gate = silu(gate) * up  (in place). Grid-stride (n reaches T*I ~ 90M during prefill).
 export const SILUMUL = `
+requires immediate_address_space;
 @group(0) @binding(0) var<storage,read_write> gate: array<f32>;
 @group(0) @binding(1) var<storage,read> up: array<f32>;
-@group(0) @binding(2) var<uniform> n: u32;
+var<immediate> n: u32;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
   let stride = nwg.x * 256u;
@@ -645,6 +652,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
 // int4 group-128 GEMV. w: [N][K/8] (8 signed nibbles/word). scale: [N][gpr].
 export const GEMV4 = `
 enable subgroups;
+requires immediate_address_space;
 struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scaleLo:f32, gpr:u32 };
 @group(0) @binding(0) var<storage,read> x: array<f32>;
 @group(0) @binding(1) var<storage,read> w: array<u32>;
@@ -653,7 +661,7 @@ struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scale
 @group(0) @binding(4) var<storage,read> loraD: array<f32>;
 @group(0) @binding(5) var<storage,read> loraB: array<f32>;
 @group(0) @binding(6) var<storage,read_write> y: array<f32>;
-@group(0) @binding(7) var<uniform> m: Meta;
+var<immediate> m: Meta;
 var<workgroup> part: array<f32,64>;       // one slot per subgroup
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,

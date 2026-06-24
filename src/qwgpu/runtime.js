@@ -681,11 +681,11 @@ export class QwenWGPU {
     const key = `gemv:${moduleKey || 'base'}:${q.K}:${q.N}:${biasBuf ? 1 : 0}:${mod ? this._loraEpoch : 0}`;
     const bg = this._bgCached(
       this.pipes.gemv,
-      [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf, meta.buf],
+      [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf],
       key,
       { sensitive: !!mod },
     );
-    this._dispatch(enc, this.pipes.gemv, bg, meta.gx, meta.gy, `gemv:${q.N}x${q.K}`);
+    this._dispatch(enc, this.pipes.gemv, bg, meta.gx, meta.gy, `gemv:${q.N}x${q.K}`, new Uint8Array(meta.buf.buffer, meta.buf.byteOffset, 32));
   }
 
   gemv4(enc, xBuf, q, yBuf, biasBuf, moduleKey) {
@@ -712,11 +712,11 @@ export class QwenWGPU {
     const key = `gemv4:${moduleKey || 'base'}:${q.K}:${q.N}:${q.gpr}:${biasBuf ? 1 : 0}:${mod ? this._loraEpoch : 0}`;
     const bg = this._bgCached(
       this.pipes.gemv4,
-      [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf, meta.buf],
+      [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf],
       key,
       { sensitive: !!mod },
     );
-    this._dispatch(enc, this.pipes.gemv4, bg, meta.gx, meta.gy, `g4:${q.N}x${q.K}`);
+    this._dispatch(enc, this.pipes.gemv4, bg, meta.gx, meta.gy, `g4:${q.N}x${q.K}`, new Uint8Array(meta.buf.buffer, meta.buf.byteOffset, 32));
     if (mod) {
       if (this.debugCapture && moduleKey === 'layers.0.self_attn.q_proj' && this.debugStep < this.debugT) {
         enc.copyBufferToBuffer(yBuf, 0, this.debugBufs.ySeq, this.debugStep * q.N * 4, q.N * 4);
@@ -964,12 +964,11 @@ export class QwenWGPU {
     const c = this.cfg,
       L = this.plan.layers[layerIndex];
     const packed = this.qkv[L.index];
-    const meta = this._uni(
-      new Uint32Array([packed.K, packed.totalN, packed.qN, packed.kN, packed.vN, packed.gpr, pos, 0]),
-    );
-    const floatMeta = new Float32Array(meta.buffer);
-    floatMeta[7] = c.rmsNormEps;
-    const bg = this._bgCached(
+    const meta = new Uint32Array([
+      packed.K, packed.totalN, packed.qN, packed.kN, packed.vN, packed.gpr, 20 /*gx placeholder*/, pos, c.headDim,
+      ...new Uint32Array(new Float32Array([c.rmsNormEps, packed.qN, packed.kN]).buffer)
+    ]);
+    const bg = this._bg(
       this.pipes.rmsNormQkvRope,
       [
         xBuf,
@@ -982,13 +981,9 @@ export class QwenWGPU {
         this.s.q,
         this.s.k,
         this.s.v,
-        this.s.normed,
-        meta,
-      ],
-      `rmsNormQkvRope:${layerIndex}`,
-      { sensitive: false },
+      ]
     );
-    this._dispatch(enc, this.pipes.rmsNormQkvRope, bg, 20, 1, 'rmsNormQkvRope');
+    this._dispatch(enc, this.pipes.rmsNormQkvRope, bg, 20, 1, 'rmsNormQkvRope', meta);
     for (const [part, out] of [
       [L.q, this.s.q],
       [L.k, this.s.k],
@@ -1114,12 +1109,10 @@ export class QwenWGPU {
     const vPairs = packed.vN / 2;
     const totalPairs = qPairs + kPairs + vPairs;
     const gx = Math.min(totalPairs, 65535);
-    const meta = this._uni(
-      new Uint32Array([
-        packed.K, totalPairs, qPairs, kPairs, vPairs, packed.gpr, gx, pos, this.cfg.headDim,
-        ...new Uint32Array(new Float32Array([this.cfg.rmsNormEps, packed.qN, packed.kN]).buffer)
-      ])
-    );
+    const meta = new Uint32Array([
+      packed.K, totalPairs, qPairs, kPairs, vPairs, packed.gpr, gx, pos, this.cfg.headDim,
+      ...new Uint32Array(new Float32Array([this.cfg.rmsNormEps, packed.qN, packed.kN]).buffer)
+    ]);
     const bg = this._bg(
       this.pipes.rmsNormQkvRope,
       [
@@ -1133,7 +1126,6 @@ export class QwenWGPU {
         qBuf,
         kBuf,
         vBuf,
-        meta,
       ]
     );
     this._dispatch(
@@ -1143,6 +1135,7 @@ export class QwenWGPU {
       gx,
       Math.ceil(totalPairs / gx),
       `fusedQkvRope:${totalPairs}x${packed.K}`,
+      meta
     );
   }
 
@@ -1191,15 +1184,8 @@ export class QwenWGPU {
     this._dispatch(enc, this.pipes.gateUpSiluGemv4, bg, gx, Math.ceil(packed.N / gx), `gu:${packed.N}x${packed.K}`);
   }
   rms(enc, xBuf, gBuf, yBuf, K) {
-    let u = this.u?.rmsHidden;
-    if (!u || K !== this.cfg.hiddenSize) {
-      const raw = new ArrayBuffer(8);
-      const dv = new DataView(raw);
-      dv.setFloat32(0, K, true);
-      dv.setFloat32(4, this.cfg.rmsNormEps, true);
-      u = this._staticUni(`rms:${K}:${this.cfg.rmsNormEps}`, new Uint8Array(raw));
-    }
-    this._dispatch(enc, this.pipes.rms, this._bgCached(this.pipes.rms, [xBuf, gBuf, yBuf, u], `rms:${K}`), 1, 1, 'rms');
+    const imm = new Float32Array([K, this.cfg.rmsNormEps]);
+    this._dispatch(enc, this.pipes.rms, this._bgCached(this.pipes.rms, [xBuf, gBuf, yBuf], `rms:${K}`), 1, 1, 'rms', imm);
   }
   rope(enc, xBuf, pos, nHeads) {
     this._dispatch(
@@ -1366,20 +1352,14 @@ export class QwenWGPU {
   }
 
   _addInto(enc, yBuf, aBuf, n) {
-    const cache = n === this.cfg.hiddenSize;
-    const u = cache ? this.u.addHidden : this._uni(new Uint32Array([n]));
-    const bg = cache
-      ? this._bgCached(this.pipes.add, [aBuf, yBuf, u], `add:${n}`)
-      : this._bg(this.pipes.add, [aBuf, yBuf, u]);
-    this._dispatch(enc, this.pipes.add, bg, Math.min(Math.ceil(n / 256), 65535), 1, 'add');
+    const imm = new Uint32Array([n]);
+    const bg = this._bgCached(this.pipes.add, [aBuf, yBuf], `add:${n}`);
+    this._dispatch(enc, this.pipes.add, bg, Math.min(Math.ceil(n / 256), 65535), 1, 'add', imm);
   }
   _siluMul(enc, gateBuf, upBuf, n) {
-    const cache = n === this.cfg.intermediateSize;
-    const u = cache ? this.u.siluIntermediate : this._uni(new Uint32Array([n]));
-    const bg = cache
-      ? this._bgCached(this.pipes.silu, [gateBuf, upBuf, u], `silu:${n}`)
-      : this._bg(this.pipes.silu, [gateBuf, upBuf, u]);
-    this._dispatch(enc, this.pipes.silu, bg, Math.min(Math.ceil(n / 256), 65535), 1, 'silu');
+    const imm = new Uint32Array([n]);
+    const bg = this._bgCached(this.pipes.silu, [gateBuf, upBuf], `silu:${n}`);
+    this._dispatch(enc, this.pipes.silu, bg, Math.min(Math.ceil(n / 256), 65535), 1, 'silu', imm);
   }
   embedRow(enc, id) {
     const e = this.q[this.plan.embed.name];
