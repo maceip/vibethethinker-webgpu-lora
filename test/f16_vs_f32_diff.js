@@ -62,7 +62,39 @@ export async function runF16Diff(opts = {}) {
   return { hasF16: true, note: 'f16 attention-combine now selectable; expand capture for numeric eval' };
 }
 
+// Reusable numeric helpers (pure JS) for harnesses.
+export function maxAbsDiff(a, b) {
+  let m = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const d = Math.abs(a[i] - b[i]);
+    if (d > m) m = d;
+  }
+  return m;
+}
+
+export function maxRelDiff(a, b, eps = 1e-12) {
+  let m = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const denom = Math.max(Math.abs(a[i]), Math.abs(b[i]), eps);
+    const r = Math.abs(a[i] - b[i]) / denom;
+    if (r > m) m = r;
+  }
+  return m;
+}
+
+export function topKMatch(a, b, k = 5) {
+  const ia = Array.from(a).map((v,i)=>({v,i})).sort((x,y)=>y.v-x.v).slice(0,k).map(x=>x.i);
+  const ib = Array.from(b).map((v,i)=>({v,i})).sort((x,y)=>y.v-x.v).slice(0,k).map(x=>x.i);
+  const setB = new Set(ib);
+  let matches = 0;
+  for (const i of ia) if (setB.has(i)) matches++;
+  return { matches, k, rate: matches / k };
+}
+
 // Auto-run hook for convenience in some test loaders:
 if (typeof window !== 'undefined') {
   window.runF16Diff = runF16Diff;
+  window.f16DiffHelpers = { maxAbsDiff, maxRelDiff, topKMatch };
 }
