@@ -163,24 +163,31 @@ export class QwenWGPU {
       return ms / iters;
     };
 
-    // Example: autotune 'add' (very hot residual path)
-    try {
-      let best = { wg: this.workgroupSize || 256, ms: Infinity };
-      for (const wg of cands) {
-        const p = this._pipe(ADD, `add:autotune:${wg}`, { WG: wg });
-        p.__wg = wg; // for dispatch math above
-        const ms = await timeKernel(p, 4096, `add${wg}`);
-        if (ms < best.ms) best = { wg, ms };
-        results[`add:${wg}`] = ms;
+    // Autotune a few hot, override-friendly kernels (add, rms, silu).
+    const kernels = [
+      { name: 'add', src: ADD, n: 8192 },
+      { name: 'rms', src: RMSNORM, n: 4096 },   // K=4096 typical
+      { name: 'silu', src: SILUMUL, n: 8192 },
+    ];
+
+    for (const k of kernels) {
+      try {
+        let best = { wg: 256, ms: Infinity };
+        for (const wg of cands) {
+          const p = this._pipe(k.src, `${k.name}:autotune:${wg}`, { WG: wg });
+          p.__wg = wg;
+          const ms = await timeKernel(p, k.n, `${k.name}${wg}`);
+          results[`${k.name}:${wg}`] = ms;
+          if (ms < best.ms) best = { wg, ms };
+        }
+        results[`best${k.name[0].toUpperCase()}${k.name.slice(1)}`] = best;
+        if (opts.apply && this.pipes[k.name]) {
+          this.pipes[k.name] = this._pipe(k.src, k.name, { WG: best.wg });
+          this.pipes[k.name].__wg = best.wg;
+        }
+      } catch (e) {
+        results[`${k.name}Error`] = String(e);
       }
-      results.bestAdd = best;
-      if (opts.apply) {
-        // hot swap a production pipe with the winner (demo)
-        this.pipes.add = this._pipe(ADD, 'add', { WG: best.wg });
-        this.pipes.add.__wg = best.wg;
-      }
-    } catch (e) {
-      results.addError = String(e);
     }
 
     console.log('[autotune] WG microbench results (ms/iter):', results);

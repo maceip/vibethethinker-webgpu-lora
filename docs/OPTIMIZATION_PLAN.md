@@ -329,9 +329,10 @@ Ready for: run the harness on real hardware for numbers; next could be ATTN_PART
 - Phase 4 basic autotune: added `autotuneWorkgroups()` skeleton.
   - Tries candidate WGs (default 32/64/128/256) for override-capable kernels.
   - Uses wall-time + onSubmittedWorkDone micro-dispatches.
-  - Currently exercises 'add' (hot residual); returns per-cand timings + best.
-  - Optional `apply: true` hot-swaps the production pipe.
-  - Exposed for manual call or future load-time use in build().
+  - Exercises add / rms / silu (the hottest per-token scalar kernels).
+  - Returns per-candidate timings + best*; optional `apply:true` hot-swaps live pipes.
+  - Easy to extend to attnC, rope, etc.
+  - Exposed for manual call (`rt.autotuneWorkgroups({apply:true})`) or future load-time use.
 - Plan records the WG autotune entry point.
 
 Next linear: run f16 harness on hardware for real deltas (partial attn now covered too), paged or prefill f16 attn, flesh out autotune (more kernels, timestamp queries, persist best-per-gpu), more overrides, Phase 5 GPU sampling.
