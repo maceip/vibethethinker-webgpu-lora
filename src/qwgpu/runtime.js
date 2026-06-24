@@ -1066,6 +1066,8 @@ export class QwenWGPU {
         'attnPrefillBlockPaged',
       );
     } else {
+      const imm1 = new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, T]);
+      const imm2 = new Uint32Array([0, this.pam.maxBlocksPerSeq]);
       this._dispatch(
         enc,
         this.pipes.attnPrefillPaged,
@@ -1075,12 +1077,11 @@ export class QwenWGPU {
           vc,
           oBuf,
           this.s.blockTableBuf,
-          this._uni(new Uint32Array([c.numHeads, c.numKVHeads, c.headDim, T])),
-          this._uni(new Uint32Array([0, this.pam.maxBlocksPerSeq])),
         ]),
         c.numHeads,
         T,
         'attnPrefillPaged',
+        [imm1, imm2],
       );
     }
   }

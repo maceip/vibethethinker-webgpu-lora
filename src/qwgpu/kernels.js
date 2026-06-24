@@ -1585,6 +1585,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 
 export const ATTN_PREFILL_PAGED = `
 enable subgroups;
+requires immediate_address_space;
 @group(0) @binding(0) var<storage,read> q: array<f32>;
 @group(0) @binding(1) var<storage,read> kc: array<f32>;
 @group(0) @binding(2) var<storage,read> vc: array<f32>;
