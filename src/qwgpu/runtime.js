@@ -107,6 +107,13 @@ export class QwenWGPU {
     return !!this.dev.features.has('shader-f16');
   }
 
+  setUseF16(v) {
+    this._useF16 = !!v && this.hasF16Compute();
+    // When true, future dispatches can select f16 WGSL variants (to be added).
+    // For now just observable.
+  }
+  usingF16() { return !!this._useF16; }
+
   _buf(size, usage = STORAGE) {
     return this.pool.buffer(size, usage);
   }

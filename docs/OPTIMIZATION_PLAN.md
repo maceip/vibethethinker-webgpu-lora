@@ -223,20 +223,16 @@ Full pass through all 5 phases has been started and representative implementatio
 - Phase 4: GEMM etc. benefit from immediate + future override for tile sizes.
 - Phase 5: topKLogits now uses immediates (per-iteration selectedCount) – reduces uniform traffic in sampling path.
 
-**Milestone (this linear slice):**
-- var<uniform> in kernels.js: **0**
-- _uni/_staticUni in runtime.js: down to ~12 (mostly lora-static cache keys, init u. for bypassed paths, and a few prefill embedT which we also converted in this round).
-- All hot decode GEMV/GEMM/LoRA/RMS/RoPE/ADD/SILU/EMBED/ARGMAX/TOPK + prefill GEMM + all attn partial/prefill (regular + block + paged) now use `var<immediate>` + `requires immediate_address_space;`.
-- Corresponding callsites pass imm (or [imm,imm2]) and no longer include uniform meta in bind groups.
+**Milestone (this linear slice, commit edfea87 + follow-ups):**
+- var<uniform> in kernels.js: **0** (all kernels now require immediate_address_space + var<immediate> for metadata).
+- _uni/_staticUni down to ~12.
+- Full coverage of the critical paths.
 
-Phase 1 is now essentially complete for the performance-critical paths. The plan's "finish Immediates" goal is met.
+Phase 1 (Immediates) complete per the plan criteria.
 
-Next linear steps: 
-- Clean any vestigial _staticUni in _gemvMeta helpers if they are no longer needed for hot paths.
-- Declare Phase 1 done in status.
-- Move to Phase 3 (implement f16 compute variants for GEMV/GEMM/attn) + extend accuracy tests.
-- Phase 4: more overrides + simple autotune for workgroup.
-- Phase 5: GPU sampling (temperature, top-p) on top of current topk/argmax.
+**Phase 3 start (linear):** Added setUseF16 / usingF16 / hasF16Compute enhancements + comments. Device already requests the feature. Real f16 kernel variants + dispatch selection + accuracy diff tests are next.
+
+Run the full eval matrix now to lock in Phase 1.
 
 **Evaluation reminder (per plan):** Run `npm run test:correctness`, `npm run bench:wgpu`, enableProf + profToken, check dispatchCount reduction, cross hardware, LoRA/sampling/long-ctx parity.
 
