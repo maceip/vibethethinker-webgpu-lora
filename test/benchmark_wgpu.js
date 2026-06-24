@@ -15,6 +15,7 @@ async function requestDevice() {
     requiredLimits: {
       maxBufferSize: adapter.limits.maxBufferSize,
       maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
     },
   });
   return { adapter, dev, hasTimestamp };
@@ -79,7 +80,7 @@ window.run = async () => {
     maxSamplingTopK: 64,
   });
   const tBuild = performance.now();
-  await rt.build('/model');
+  await rt.build('mock');
   row({
     type: 'load',
     seconds: (performance.now() - tBuild) / 1000,

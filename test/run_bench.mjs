@@ -13,9 +13,10 @@ const page = await browser.newPage();
 const rows = [];
 page.on('console', m => {
   const t = m.text();
-  if (t.startsWith('VWG_BENCH')) { rows.push(t); console.log(t); }
-  else if (t.startsWith('VWG')) console.log(t);
+  console.log('BROWSER:', t);
+  if (t.startsWith('VWG_BENCH')) { rows.push(t); }
 });
+page.on('requestfailed', request => console.log('REQFAIL:', request.url(), request.failure().errorText));
 page.on('pageerror', e => console.log('PAGEERR', String(e).slice(0, 300)));
 await page.goto('http://localhost:8013/test/bench.html', { waitUntil: 'domcontentloaded' });
 const t0 = Date.now();

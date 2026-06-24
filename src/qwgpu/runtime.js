@@ -226,14 +226,24 @@ export class QwenWGPU {
       uploadF32: (arr) => this._f32(arr),
       uploadU32: (arr) => this._u32(arr),
     });
-    await streamSafetensors(source, {
-      names: this.schema.expectedNames,
-      onProgress,
-      onTensor: async (tensor) => {
-        uploader.visit(tensor);
-        if (uploader.seen.size % 48 === 0) await new Promise((r) => setTimeout(r, 0));
-      },
-    });
+    if (source === 'mock') {
+      for (const name of this.schema.expectedNames) {
+        const desc = this.schema.tensors.find((t) => t.name === name);
+        const shape = desc.shape;
+        const numel = shape.reduce((a, b) => a * b, 1);
+        const type = desc.quant === 'int8' ? 'I8' : 'F32';
+        uploader.visit({ name, shape, data: new Uint8Array(numel * (type === 'I8' ? 1 : 4)), type });
+      }
+    } else {
+      await streamSafetensors(source, {
+        names: this.schema.expectedNames,
+        onProgress,
+        onTensor: async (tensor) => {
+          uploader.visit(tensor);
+          if (uploader.seen.size % 48 === 0) await new Promise((r) => setTimeout(r, 0));
+        },
+      });
+    }
     uploader.finalize();
     await this._buildPackedProjectionBuffers();
     // Context window (this.maxCtx) set above from opts; RoPE tables + KV cache sized to it.
