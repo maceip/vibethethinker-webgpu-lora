@@ -376,10 +376,11 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 
 // embed lookup: dequant row `id` of int8 embed [vocab][hidden] -> out[hidden]
 export const EMBED = `
+requires immediate_address_space;
 @group(0) @binding(0) var<storage,read> w: array<u32>;
 @group(0) @binding(1) var<storage,read> scale: array<f32>;
 @group(0) @binding(2) var<storage,read_write> out: array<f32>;
-@group(0) @binding(3) var<uniform> m: vec2<u32>;   // id, hidden
+var<immediate> m: vec2<u32>;   // id, hidden
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let k = g.x; let id = m.x; let H = m.y; if (k >= H) { return; }
@@ -604,9 +605,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 
 // GPU argmax over logits -> out[0] = best index (one 4-byte readback instead of 608KB)
 export const ARGMAX = `
+requires immediate_address_space;
 @group(0) @binding(0) var<storage,read> logits: array<f32>;
 @group(0) @binding(1) var<storage,read_write> out: array<u32>;
-@group(0) @binding(2) var<uniform> n: u32;
+var<immediate> n: u32;
 var<workgroup> bv: array<f32,256>; var<workgroup> bi: array<u32,256>;
 @compute @workgroup_size(256)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
@@ -699,6 +701,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 // int4 group-128 GEMV that adds directly into y (residual fusion).
 export const GEMV4_ADD = `
 enable subgroups;
+requires immediate_address_space;
 struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scaleLo:f32, gpr:u32 };
 @group(0) @binding(0) var<storage,read> x: array<f32>;
 @group(0) @binding(1) var<storage,read> w: array<u32>;
@@ -707,7 +710,7 @@ struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scale
 @group(0) @binding(4) var<storage,read> loraD: array<f32>;
 @group(0) @binding(5) var<storage,read> loraB: array<f32>;
 @group(0) @binding(6) var<storage,read_write> y: array<f32>;
-@group(0) @binding(7) var<uniform> m: Meta;
+var<immediate> m: Meta;
 var<workgroup> part: array<f32,64>;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
@@ -745,6 +748,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 // [Q rows][K rows][V rows], each row still int4 group-128 with the same input K.
 export const QKV_GEMV4 = `
 enable subgroups;
+requires immediate_address_space;
 struct Meta { K:u32, totalN:u32, qN:u32, kN:u32, vN:u32, gpr:u32, gridX:u32, p0:u32 };
 @group(0) @binding(0) var<storage,read> x: array<f32>;
 @group(0) @binding(1) var<storage,read> w: array<u32>;
@@ -753,7 +757,7 @@ struct Meta { K:u32, totalN:u32, qN:u32, kN:u32, vN:u32, gpr:u32, gridX:u32, p0:
 @group(0) @binding(4) var<storage,read_write> qOut: array<f32>;
 @group(0) @binding(5) var<storage,read_write> kOut: array<f32>;
 @group(0) @binding(6) var<storage,read_write> vOut: array<f32>;
-@group(0) @binding(7) var<uniform> m: Meta;
+var<immediate> m: Meta;
 var<workgroup> part: array<f32,64>;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
@@ -796,6 +800,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 // LoRA deltas for gate and up are optionally added before applying SiLU(gate)*up.
 export const GATE_UP_SILU_GEMV4 = `
 enable subgroups;
+requires immediate_address_space;
 struct Meta0 { K:u32, N:u32, gpr:u32, gridX:u32, gateRank:u32, upRank:u32, hasGateLora:u32, hasUpLora:u32 };
 struct Meta1 { gateScaleLo:f32, upScaleLo:f32, p0:f32, p1:f32 };
 @group(0) @binding(0) var<storage,read> x: array<f32>;
@@ -806,8 +811,8 @@ struct Meta1 { gateScaleLo:f32, upScaleLo:f32, p0:f32, p1:f32 };
 @group(0) @binding(5) var<storage,read> gateB: array<f32>;
 @group(0) @binding(6) var<storage,read> upD: array<f32>;
 @group(0) @binding(7) var<storage,read> upB: array<f32>;
-@group(0) @binding(8) var<uniform> m0: Meta0;
-@group(0) @binding(9) var<uniform> m1: Meta1;
+var<immediate> m0: Meta0;
+var<immediate> m1: Meta1;
 var<workgroup> partG: array<f32,64>;
 var<workgroup> partU: array<f32,64>;
 @compute @workgroup_size(64)
@@ -851,10 +856,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 // ---- W4A8 (Act-Quant) Kernels ----
 
 export const DYN_QUANT_X = `
+requires immediate_address_space;
 @group(0) @binding(0) var<storage, read> x: array<f32>;
 @group(0) @binding(1) var<storage, read_write> x_q: array<u32>;
 @group(0) @binding(2) var<storage, read_write> scale_x: array<f32>;
-@group(0) @binding(3) var<uniform> K: u32;
+var<immediate> K: u32;
 var<workgroup> sh_max: array<f32, 64>;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
@@ -883,10 +889,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 `;
 
 export const DYN_QUANT_X_T = `
+requires immediate_address_space;
 @group(0) @binding(0) var<storage, read> x: array<f32>;
 @group(0) @binding(1) var<storage, read_write> x_q: array<u32>;
 @group(0) @binding(2) var<storage, read_write> scale_x: array<f32>;
-@group(0) @binding(3) var<uniform> m: vec2<u32>; // K, T
+var<immediate> m: vec2<u32>; // K, T
 var<workgroup> sh_max: array<f32, 64>;
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
@@ -920,6 +927,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 export const GEMV4_W4A8 = (hasDP4a, wgSize = 64) => `
 enable subgroups;
 ${hasDP4a ? 'enable packed_4x8_integer_dot_product;' : ''}
+requires immediate_address_space;
 struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scaleLo:f32, gpr:u32 };
 @group(0) @binding(0) var<storage,read> x_q: array<u32>;
 @group(0) @binding(1) var<storage,read> scale_x: array<f32>;
@@ -929,7 +937,7 @@ struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scale
 @group(0) @binding(5) var<storage,read> loraD: array<f32>;
 @group(0) @binding(6) var<storage,read> loraB: array<f32>;
 @group(0) @binding(7) var<storage,read_write> y: array<f32>;
-@group(0) @binding(8) var<uniform> m: Meta;
+var<immediate> m: Meta;
 
 ${
   hasDP4a
@@ -986,6 +994,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 export const GEMV4_ADD_W4A8 = (hasDP4a, wgSize = 64) => `
 enable subgroups;
 ${hasDP4a ? 'enable packed_4x8_integer_dot_product;' : ''}
+requires immediate_address_space;
 struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scaleLo:f32, gpr:u32 };
 @group(0) @binding(0) var<storage,read> x_q: array<u32>;
 @group(0) @binding(1) var<storage,read> scale_x: array<f32>;
@@ -995,7 +1004,7 @@ struct Meta { K:u32, N:u32, rank:u32, hasBias:u32, hasLora:u32, gridX:u32, scale
 @group(0) @binding(5) var<storage,read> loraD: array<f32>;
 @group(0) @binding(6) var<storage,read> loraB: array<f32>;
 @group(0) @binding(7) var<storage,read_write> y: array<f32>;
-@group(0) @binding(8) var<uniform> m: Meta;
+var<immediate> m: Meta;
 
 ${
   hasDP4a
@@ -1052,6 +1061,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 export const QKV_GEMV4_W4A8 = (hasDP4a, wgSize = 64) => `
 enable subgroups;
 ${hasDP4a ? 'enable packed_4x8_integer_dot_product;' : ''}
+requires immediate_address_space;
 struct Meta { K:u32, totalN:u32, qN:u32, kN:u32, vN:u32, gpr:u32, gridX:u32, p0:u32 };
 @group(0) @binding(0) var<storage,read> x_q: array<u32>;
 @group(0) @binding(1) var<storage,read> scale_x: array<f32>;
@@ -1061,7 +1071,7 @@ struct Meta { K:u32, totalN:u32, qN:u32, kN:u32, vN:u32, gpr:u32, gridX:u32, p0:
 @group(0) @binding(5) var<storage,read_write> qOut: array<f32>;
 @group(0) @binding(6) var<storage,read_write> kOut: array<f32>;
 @group(0) @binding(7) var<storage,read_write> vOut: array<f32>;
-@group(0) @binding(8) var<uniform> m: Meta;
+var<immediate> m: Meta;
 
 ${
   hasDP4a
@@ -1123,6 +1133,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 export const GATE_UP_SILU_GEMV4_W4A8 = (hasDP4a, wgSize = 64) => `
 enable subgroups;
 ${hasDP4a ? 'enable packed_4x8_integer_dot_product;' : ''}
+requires immediate_address_space;
 struct Meta0 { K:u32, N:u32, gpr:u32, gridX:u32, gateRank:u32, upRank:u32, hasGateLora:u32, hasUpLora:u32 };
 struct Meta1 { gateScaleLo:f32, upScaleLo:f32, p0:f32, p1:f32 };
 @group(0) @binding(0) var<storage,read> x_q: array<u32>;
@@ -1134,8 +1145,8 @@ struct Meta1 { gateScaleLo:f32, upScaleLo:f32, p0:f32, p1:f32 };
 @group(0) @binding(6) var<storage,read> gateB: array<f32>;
 @group(0) @binding(7) var<storage,read> upD: array<f32>;
 @group(0) @binding(8) var<storage,read> upB: array<f32>;
-@group(0) @binding(9) var<uniform> m0: Meta0;
-@group(0) @binding(10) var<uniform> m1: Meta1;
+var<immediate> m0: Meta0;
+var<immediate> m1: Meta1;
 
 ${
   hasDP4a

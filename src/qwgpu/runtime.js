@@ -127,16 +127,18 @@ export class QwenWGPU {
     this.lastDispatchCount = 0;
   }
 
-  _pipe(code, name) {
+  _pipe(code, name, overrides = null) {
     const processedCode = typeof code === 'string' ? code.replaceAll('WG_SIZE', this.workgroupSize || 64) : code;
     const m = this.dev.createShaderModule({
       label: name || undefined,
       code: processedCode,
     });
+    const comp = { module: m, entryPoint: 'main' };
+    if (overrides && typeof overrides === 'object') comp.constants = overrides;
     return this.dev.createComputePipeline({
       label: name ? `${name}-pipeline` : undefined,
       layout: 'auto',
-      compute: { module: m, entryPoint: 'main' },
+      compute: comp,
     });
   }
 
@@ -186,8 +188,8 @@ export class QwenWGPU {
       ropeQK: this._pipe(ROPE_QK, 'ropeQK'),
       attnP: this._pipe(ATTN_PARTIAL, 'attnP'),
       attnC: this._pipe(ATTN_COMBINE, 'attnC'),
-      add: this._pipe(ADD, 'add'),
-      silu: this._pipe(SILUMUL, 'silu'),
+      add: this._pipe(ADD, 'add', { WG: this.workgroupSize || 256 }),
+      silu: this._pipe(SILUMUL, 'silu', { WG: this.workgroupSize || 256 }),
       embed: this._pipe(EMBED, 'embed'),
       embedBuf: this._pipe(EMBED_BUF, 'embedBuf'),
       argmax: this._pipe(ARGMAX, 'argmax'),
@@ -518,7 +520,17 @@ export class QwenWGPU {
     const p = enc.beginComputePass(ts ? { timestampWrites: ts } : undefined);
     p.setPipeline(pipe);
     if (bg) p.setBindGroup(0, bg);
-    if (imm) p.setImmediates(0, imm);
+    if (imm) {
+      if (Array.isArray(imm)) {
+        let off = 0;
+        for (const part of imm) {
+          p.setImmediates(off, part);
+          off += part.byteLength || (part.length * (part.BYTES_PER_ELEMENT || 4));
+        }
+      } else {
+        p.setImmediates(0, imm);
+      }
+    }
     p.dispatchWorkgroups(gx, gy);
     p.end();
   }
@@ -776,25 +788,25 @@ export class QwenWGPU {
     const key = `gemv4add:${moduleKey || 'base'}:${q.K}:${q.N}:${q.gpr}:${biasBuf ? 1 : 0}:${mod ? this._loraEpoch : 0}`;
     const bg = this._bgCached(
       this.pipes.gemv4Add,
-      [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf, meta.buf],
+      [xBuf, q.w, q.scale, biasBuf || this.s.dummy, this.s.loraD, mod ? mod.B : this.s.dummy, yBuf],
       key,
       { sensitive: !!mod },
     );
-    this._dispatch(enc, this.pipes.gemv4Add, bg, meta.gx, meta.gy, `g4add:${q.N}x${q.K}`);
+    this._dispatch(enc, this.pipes.gemv4Add, bg, meta.gx, meta.gy, `g4add:${q.N}x${q.K}`, new Uint8Array(meta.buf.buffer, meta.buf.byteOffset, 32));
   }
 
   dynQuant(enc, xBuf, x_qBuf, scale_xBuf, K) {
     const numGroups = Math.ceil(K / 128);
-    const u = this._uni(new Uint32Array([K]));
-    const bg = this._bg(this.pipes.dynQuant, [xBuf, x_qBuf, scale_xBuf, u]);
-    this._dispatch(enc, this.pipes.dynQuant, bg, numGroups, 1, 'dynQuant');
+    const imm = new Uint32Array([K]);
+    const bg = this._bg(this.pipes.dynQuant, [xBuf, x_qBuf, scale_xBuf]);
+    this._dispatch(enc, this.pipes.dynQuant, bg, numGroups, 1, 'dynQuant', imm);
   }
 
   dynQuantT(enc, xBuf, x_qBuf, scale_xBuf, K, T) {
     const numGroups = Math.ceil(K / 128);
-    const u = this._uni(new Uint32Array([K, T]));
-    const bg = this._bg(this.pipes.dynQuantT, [xBuf, x_qBuf, scale_xBuf, u]);
-    this._dispatch(enc, this.pipes.dynQuantT, bg, numGroups, T, 'dynQuantT');
+    const imm = new Uint32Array([K, T]);
+    const bg = this._bg(this.pipes.dynQuantT, [xBuf, x_qBuf, scale_xBuf]);
+    this._dispatch(enc, this.pipes.dynQuantT, bg, numGroups, T, 'dynQuantT', imm);
   }
 
   gemv4W4A8(enc, xBuf, x_qBuf, scale_xBuf, q, yBuf, biasBuf, moduleKey) {
@@ -825,12 +837,11 @@ export class QwenWGPU {
         this.s.loraD,
         mod ? mod.B : this.s.dummy,
         yBuf,
-        meta.buf,
       ],
       key,
       { sensitive: !!mod },
     );
-    this._dispatch(enc, this.pipes.gemv4W4A8, bg, meta.gx, meta.gy, `g4w4a8:${q.N}x${q.K}`);
+    this._dispatch(enc, this.pipes.gemv4W4A8, bg, meta.gx, meta.gy, `g4w4a8:${q.N}x${q.K}`, new Uint8Array(meta.buf.buffer, meta.buf.byteOffset, 32));
   }
 
   gemv4AddW4A8(enc, xBuf, x_qBuf, scale_xBuf, q, yBuf, biasBuf, moduleKey) {
@@ -849,23 +860,19 @@ export class QwenWGPU {
         this.s.loraD,
         mod ? mod.B : this.s.dummy,
         yBuf,
-        meta.buf,
       ],
       key,
       { sensitive: !!mod },
     );
-    this._dispatch(enc, this.pipes.gemv4AddW4A8, bg, meta.gx, meta.gy, `g4addw4a8:${q.N}x${q.K}`);
+    this._dispatch(enc, this.pipes.gemv4AddW4A8, bg, meta.gx, meta.gy, `g4addw4a8:${q.N}x${q.K}`, new Uint8Array(meta.buf.buffer, meta.buf.byteOffset, 32));
   }
 
   qkvGemv4W4A8(enc, xBuf, x_qBuf, scale_xBuf, packed, qBuf, kBuf, vBuf, L) {
     const gx = Math.min(packed.totalN, 65535);
-    const meta = this._staticUni(
-      `qkv:${packed.K}:${packed.totalN}:${packed.qN}:${packed.kN}:${packed.vN}:${packed.gpr}`,
-      new Uint32Array([packed.K, packed.totalN, packed.qN, packed.kN, packed.vN, packed.gpr, gx, 0]),
-    );
+    const imm = new Uint32Array([packed.K, packed.totalN, packed.qN, packed.kN, packed.vN, packed.gpr, gx, 0]);
     const bg = this._bgCached(
       this.pipes.qkvGemv4W4A8,
-      [x_qBuf, scale_xBuf, packed.w, packed.scale, packed.bias, qBuf, kBuf, vBuf, meta],
+      [x_qBuf, scale_xBuf, packed.w, packed.scale, packed.bias, qBuf, kBuf, vBuf],
       `qkv_w4a8:${L.index}`,
       { sensitive: false },
     );
@@ -876,6 +883,7 @@ export class QwenWGPU {
       gx,
       Math.ceil(packed.totalN / gx),
       `qkvw4a8:${packed.totalN}x${packed.K}`,
+      imm,
     );
     for (const [part, out] of [
       [L.q, qBuf],
@@ -898,23 +906,17 @@ export class QwenWGPU {
     if (gateMod) this._loraA(enc, xBuf, gate, gateMod, this.s.loraD, L.gate.loraKey, 'loraA:gate');
     if (upMod) this._loraA(enc, xBuf, up, upMod, this.s.loraD2, L.up.loraKey, 'loraA:up');
     const gx = Math.min(packed.N, 65535);
-    const m0 = this._staticUni(
-      `gu0:${this._loraEpoch}:${packed.K}:${packed.N}:${packed.gpr}:${gateMod ? gateMod.rank : 0}:${upMod ? upMod.rank : 0}:${gateMod ? 1 : 0}:${upMod ? 1 : 0}`,
-      new Uint32Array([
-        packed.K,
-        packed.N,
-        packed.gpr,
-        gx,
-        gateMod ? gateMod.rank : 0,
-        upMod ? upMod.rank : 0,
-        gateMod ? 1 : 0,
-        upMod ? 1 : 0,
-      ]),
-    );
-    const m1 = this._staticUni(
-      `gu1:${this._loraEpoch}:${gateMod ? gateMod.scale : 0}:${upMod ? upMod.scale : 0}`,
-      new Float32Array([gateMod ? gateMod.scale : 0, upMod ? upMod.scale : 0, 0, 0]),
-    );
+    const m0 = new Uint32Array([
+      packed.K,
+      packed.N,
+      packed.gpr,
+      gx,
+      gateMod ? gateMod.rank : 0,
+      upMod ? upMod.rank : 0,
+      gateMod ? 1 : 0,
+      upMod ? 1 : 0,
+    ]);
+    const m1 = new Float32Array([gateMod ? gateMod.scale : 0, upMod ? upMod.scale : 0, 0, 0]);
     const bg = this._bgCached(
       this.pipes.gateUpSiluGemv4W4A8,
       [
@@ -927,8 +929,6 @@ export class QwenWGPU {
         gateMod ? gateMod.B : this.s.dummy,
         this.s.loraD2,
         upMod ? upMod.B : this.s.dummy,
-        m0,
-        m1,
       ],
       `gu_w4a8:${L.index}:${this._loraEpoch}:${gateMod ? 1 : 0}:${upMod ? 1 : 0}`,
       { sensitive: !!(gateMod || upMod) },
@@ -940,6 +940,7 @@ export class QwenWGPU {
       gx,
       Math.ceil(packed.N / gx),
       `guw4a8:${packed.N}x${packed.K}`,
+      [m0, m1],
     );
   }
 
@@ -1086,17 +1087,14 @@ export class QwenWGPU {
 
   qkvGemv4(enc, xBuf, packed, qBuf, kBuf, vBuf, L) {
     const gx = Math.min(packed.totalN, 65535);
-    const meta = this._staticUni(
-      `qkv:${packed.K}:${packed.totalN}:${packed.qN}:${packed.kN}:${packed.vN}:${packed.gpr}`,
-      new Uint32Array([packed.K, packed.totalN, packed.qN, packed.kN, packed.vN, packed.gpr, gx, 0]),
-    );
+    const imm = new Uint32Array([packed.K, packed.totalN, packed.qN, packed.kN, packed.vN, packed.gpr, gx, 0]);
     const bg = this._bgCached(
       this.pipes.qkvGemv4,
-      [xBuf, packed.w, packed.scale, packed.bias, qBuf, kBuf, vBuf, meta],
+      [xBuf, packed.w, packed.scale, packed.bias, qBuf, kBuf, vBuf],
       `qkv:${L.index}`,
       { sensitive: false },
     );
-    this._dispatch(enc, this.pipes.qkvGemv4, bg, gx, Math.ceil(packed.totalN / gx), `qkv:${packed.totalN}x${packed.K}`);
+    this._dispatch(enc, this.pipes.qkvGemv4, bg, gx, Math.ceil(packed.totalN / gx), `qkv:${packed.totalN}x${packed.K}`, imm);
     for (const [part, out] of [
       [L.q, qBuf],
       [L.k, kBuf],
@@ -1154,23 +1152,17 @@ export class QwenWGPU {
     if (gateMod) this._loraA(enc, xBuf, gate, gateMod, this.s.loraD, L.gate.loraKey, 'loraA:gate');
     if (upMod) this._loraA(enc, xBuf, up, upMod, this.s.loraD2, L.up.loraKey, 'loraA:up');
     const gx = Math.min(packed.N, 65535);
-    const m0 = this._staticUni(
-      `gu0:${this._loraEpoch}:${packed.K}:${packed.N}:${packed.gpr}:${gateMod ? gateMod.rank : 0}:${upMod ? upMod.rank : 0}:${gateMod ? 1 : 0}:${upMod ? 1 : 0}`,
-      new Uint32Array([
-        packed.K,
-        packed.N,
-        packed.gpr,
-        gx,
-        gateMod ? gateMod.rank : 0,
-        upMod ? upMod.rank : 0,
-        gateMod ? 1 : 0,
-        upMod ? 1 : 0,
-      ]),
-    );
-    const m1 = this._staticUni(
-      `gu1:${this._loraEpoch}:${gateMod ? gateMod.scale : 0}:${upMod ? upMod.scale : 0}`,
-      new Float32Array([gateMod ? gateMod.scale : 0, upMod ? upMod.scale : 0, 0, 0]),
-    );
+    const m0 = new Uint32Array([
+      packed.K,
+      packed.N,
+      packed.gpr,
+      gx,
+      gateMod ? gateMod.rank : 0,
+      upMod ? upMod.rank : 0,
+      gateMod ? 1 : 0,
+      upMod ? 1 : 0,
+    ]);
+    const m1 = new Float32Array([gateMod ? gateMod.scale : 0, upMod ? upMod.scale : 0, 0, 0]);
     const bg = this._bgCached(
       this.pipes.gateUpSiluGemv4,
       [
@@ -1182,13 +1174,11 @@ export class QwenWGPU {
         gateMod ? gateMod.B : this.s.dummy,
         this.s.loraD2,
         upMod ? upMod.B : this.s.dummy,
-        m0,
-        m1,
       ],
       `gu:${L.index}:${this._loraEpoch}:${gateMod ? 1 : 0}:${upMod ? 1 : 0}`,
       { sensitive: !!(gateMod || upMod) },
     );
-    this._dispatch(enc, this.pipes.gateUpSiluGemv4, bg, gx, Math.ceil(packed.N / gx), `gu:${packed.N}x${packed.K}`);
+    this._dispatch(enc, this.pipes.gateUpSiluGemv4, bg, gx, Math.ceil(packed.N / gx), `gu:${packed.N}x${packed.K}`, [m0, m1]);
   }
   rms(enc, xBuf, gBuf, yBuf, K) {
     const imm = new Float32Array([K, this.cfg.rmsNormEps]);
@@ -1370,13 +1360,15 @@ export class QwenWGPU {
   }
   embedRow(enc, id) {
     const e = this.q[this.plan.embed.name];
+    const imm = new Uint32Array([id, this.cfg.hiddenSize]);
     this._dispatch(
       enc,
       this.pipes.embed,
-      this._bg(this.pipes.embed, [e.w, e.scale, this.s.hidden, this._uni(new Uint32Array([id, this.cfg.hiddenSize]))]),
+      this._bg(this.pipes.embed, [e.w, e.scale, this.s.hidden]),
       Math.ceil(this.cfg.hiddenSize / 256),
       1,
       'embed',
+      imm,
     );
   }
   async argmaxLogits() {
@@ -1384,11 +1376,16 @@ export class QwenWGPU {
       throw new Error('argmaxLogits() is already in flight; concurrent generation is not supported');
     this._argmaxReadBusy = true;
     const enc = this.dev.createCommandEncoder();
+    // argmax n is passed via immediate now; the cached u.argmax can be dropped over time
+    const n = this.cfg.vocabSize || 0;
     this._dispatch(
       enc,
       this.pipes.argmax,
-      this._bgCached(this.pipes.argmax, [this.s.logits, this.s.amax, this.u.argmax], 'argmax'),
+      this._bgCached(this.pipes.argmax, [this.s.logits, this.s.amax], 'argmax'),
       1,
+      1,
+      'argmax',
+      new Uint32Array([n]),
     );
     enc.copyBufferToBuffer(this.s.amax, 0, this.argmaxRead, 0, 4);
     this.dev.queue.submit([enc.finish()]);

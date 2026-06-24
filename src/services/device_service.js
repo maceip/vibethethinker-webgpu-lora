@@ -8,6 +8,9 @@ export async function initWebGPUDevice({ log = () => {} } = {}) {
     throw new Error(
       'GPU lacks the required "subgroups" feature. The current fast WGSL kernels require subgroups and no fallback kernel set is bundled.',
     );
+  const hasSubgroupId = !!navigator.gpu.wgslLanguageFeatures?.has('subgroup_id');
+  const hasLinearIndexing = !!navigator.gpu.wgslLanguageFeatures?.has('linear_indexing');
+  const hasF16 = adapter.features.has('shader-f16');
   const reqFeatures = ['subgroups'];
   if (adapter.features.has('shader-f16')) reqFeatures.push('shader-f16');
   const dev = await adapter.requestDevice({
@@ -19,6 +22,7 @@ export async function initWebGPUDevice({ log = () => {} } = {}) {
     },
   });
   dev.addEventListener?.('uncapturederror', (e) => console.error('GPUERR', e.error.message));
-  log(`WebGPU ready. maxBuffer=${(Number(adapter.limits.maxBufferSize) / 1e9).toFixed(2)}GB`);
+  log(`WebGPU ready. maxBuffer=${(Number(adapter.limits.maxBufferSize) / 1e9).toFixed(2)}GB` +
+      ` subgroupId=${hasSubgroupId} linearIdx=${hasLinearIndexing} f16=${hasF16}`);
   return dev;
 }
