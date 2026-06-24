@@ -275,7 +275,12 @@ Next linear: more f16 kernels (RoPE math, attention score/softmax/V, GEMV4 accum
 - Still 0 var<uniform> in kernels; f32 storage maintained for engine compatibility.
 - Linear progress: f16 now covers the frequent activation math kernels (norm, residual, silu, rope).
 
+- Added RMSNORM_T_F16 + rmsTF16 pipe + selection in rmsT() (prefill / batched row RMS also uses f16 math when enabled).
+
 Continuing to accuracy harness stub + Phase 4 (more overrides + workgroup tuning) on next step.
+
+**Harness artifact added (linear):**
+- `test/f16_vs_f32_diff.js` stub created. Demonstrates toggle via setUseF16/usingF16 + skeleton for logit/activation diff capture. Ready to be wired into deep_kernel_diff or a new playwright flow for numeric tolerance + token-id parity checks (per Phase 3 eval criteria).
 
 ---
 

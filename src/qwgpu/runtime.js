@@ -20,6 +20,7 @@ import {
   ROPE_QK,
   ROPE_QK_F16,
   ROPE_T_F16,
+  RMSNORM_T_F16,
   ATTN_PARTIAL,
   ATTN_COMBINE,
   ADD,
@@ -224,6 +225,7 @@ export class QwenWGPU {
       gemm4: this._pipe(GEMM4, 'gemm4'),
       gemm4AddT: this._pipe(GEMM4_ADD_T, 'gemm4AddT'),
       rmsT: this._pipe(RMSNORM_T, 'rmsT'),
+      rmsTF16: hasF16 ? this._pipe(RMSNORM_T_F16, 'rmsTF16') : null,
       embedT: this._pipe(EMBED_T, 'embedT'),
       attnPrefill: this._pipe(ATTN_PREFILL, 'attnPrefill'),
       attnPrefillBlock: this._pipe(ATTN_PREFILL_BLOCK, 'attnPrefillBlock'),
@@ -1575,7 +1577,9 @@ export class QwenWGPU {
   }
   rmsT(enc, xBuf, gBuf, yBuf, T, K) {
     const imm = new Float32Array([K, this.cfg.rmsNormEps]);
-    this._dispatch(enc, this.pipes.rmsT, this._bg(this.pipes.rmsT, [xBuf, gBuf, yBuf]), T, 1, 'rmsT', imm);
+    const useF16 = this.usingF16() && this.pipes.rmsTF16;
+    const pipe = useF16 ? this.pipes.rmsTF16 : this.pipes.rmsT;
+    this._dispatch(enc, pipe, this._bg(pipe, [xBuf, gBuf, yBuf]), T, 1, useF16 ? 'rmsTF16' : 'rmsT', imm);
   }
   ropeT(enc, xBuf, T, nHeads, pos0 = 0) {
     const hd = this.cfg.headDim;

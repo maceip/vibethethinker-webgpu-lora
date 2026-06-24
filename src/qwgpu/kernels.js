@@ -532,6 +532,27 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   for (var k = tid; k < K; k = k + 256u) { y[base+k] = x[base+k]*inv*g[k]; }
 }`;
 
+// RMSNORM_T f16 variant (prefill/batched rows).
+export const RMSNORM_T_F16 = `
+requires immediate_address_space;
+enable f16;
+override WG: u32 = 256u;
+@group(0) @binding(0) var<storage,read> x: array<f32>;
+@group(0) @binding(1) var<storage,read> g: array<f32>;
+@group(0) @binding(2) var<storage,read_write> y: array<f32>;
+var<immediate> m: vec2<f32>;   // K, eps
+var<workgroup> part: array<f16,256>;
+@compute @workgroup_size(WG)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let tid = lid.x; let K = u32(m.x); let base = wid.x * K;
+  var s = 0.0h;
+  for (var k = tid; k < K; k = k + 256u) { let v = f16(x[base+k]); s = s + v*v; }
+  part[tid] = s; workgroupBarrier();
+  for (var t = 128u; t > 0u; t = t/2u) { if (tid < t) { part[tid] = part[tid] + part[tid+t]; } workgroupBarrier(); }
+  let inv = inverseSqrt(part[0]/f16(m.x) + f16(m.y));
+  for (var k = tid; k < K; k = k + 256u) { y[base+k] = f32( f16(x[base+k]) * inv * f16(g[k]) ); }
+}`;
+
 // RoPE over T rows [T][nHeads*headDim]; row r is at absolute position pos0+r. Pair-wise (no race).
 export const ROPE_T = `
 requires immediate_address_space;
