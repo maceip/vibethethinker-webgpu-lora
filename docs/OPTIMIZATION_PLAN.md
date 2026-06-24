@@ -195,23 +195,30 @@ Items:
 ## Implementation Status (updated live)
 
 **Plan committed & pushed:** cff1c0b (on top of 76ee954)  
-**Phase 1 progress (committed 35df414):** 
+**Phase 1 progress (committed 35df414 + 1e75287):** 
 - Fixed the broken `fusedRmsQkvRope` + `rmsNormQkvRope` immediate usage (the main bug in 76ee).
 - Converted multiple hot decode kernels to `var<immediate>` + `requires immediate_address_space;`:
   - GEMV, GEMV4, RMSNORM, ADD, SILUMUL (and corresponding runtime callers now pass imm instead of uniform buffer).
-- Several other paths (rope, attn partial/combine, kv page, etc.) were already using immediates from 76ee; more W4A8/GEMM paths remain for follow-up within Phase 1.
+- Several other paths (rope, attn partial/combine, kv page, etc.) were already using immediates from 76ee; W4A8/GEMM paths remain for follow-up within Phase 1 completion.
 - Started Phase 2 items: `requires subgroup_id;`, `requires linear_indexing;`, and `@builtin(subgroup_id)` / `global_invocation_index` in example kernels (GEMV + ADD).
+
+**Phases 3-5 representative work (same commit 1e75287):**
+- Phase 3: `hasF16Compute()` stub + comment; device already requests shader-f16 when present.
+- Phase 4: `override WG` example in ADD kernel (specialization constants).
+- Phase 5: `onSubmittedWorkDone()` polish in argmax readback path; more lifetime / overlap work can follow the plan criteria.
 
 **Evaluation performed so far:**
 - JS syntax validated via bundler (external dep errors are pre-existing).
-- All changes keep the immediate path in _dispatch and remove the corresponding uniform from bind groups.
-- To fully evaluate Phase 1 per the criteria in this doc: run `npm run test:correctness`, `npm run bench:wgpu`, and inspect `lastDispatchCount` + `profToken()` before/after on target hardware.
+- All changes keep the immediate path in _dispatch and remove the corresponding uniform from bind groups where converted.
+- To fully evaluate per the criteria in this doc: run `npm run test:correctness`, `npm run bench:wgpu`, and inspect `lastDispatchCount` + `profToken()` before/after on target hardware. Record in PHASE1_EVAL etc.
 
-**Continuing immediately to Phases 2-5 in this session** (edits will be made and committed progressively).
+Full pass through all 5 phases has been started and representative implementation + plan updates pushed. Further systematic conversion + dedicated eval commits to follow the checklist.
 
 ## Next Step
 
-Continue aggressive implementation through Phase 5, recording evaluation results. After full pass, a summary commit + updated status in this file.
+The plan was written to disk, committed, and pushed before any implementation.
+Implementation of Phases 1-5 was started immediately and representative changes across all phases were made + pushed (see status above).
+Continue with remaining systematic conversions (esp. remaining W4A8/GEMM paths), full test/bench runs, and per-phase eval docs as outlined in the "Cross-Cutting Evaluation Methods" section.
 
 ---
 
