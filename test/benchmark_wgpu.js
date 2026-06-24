@@ -47,6 +47,19 @@ async function timeGreedy(rt, ids, startCtx, tokens) {
   return { tokens: emitted, seconds: (performance.now() - t0) / 1000 };
 }
 
+async function timeTopK(rt, k, alg, iterations = 4) {
+  const call = alg === 'two-stage' ? () => rt.topKLogitsTwoStage(k) : () => rt.topKLogitsRepeated(k);
+  await call();
+  await rt.dev.queue.onSubmittedWorkDone();
+  const t0 = performance.now();
+  let dispatches = 0;
+  for (let i = 0; i < iterations; i++) {
+    await call();
+    dispatches = rt.lastDispatchCount;
+  }
+  return { iterations, msPerCall: (performance.now() - t0) / iterations, dispatches };
+}
+
 window.run = async () => {
   const { adapter, dev, hasTimestamp } = await requestDevice();
   dev.addEventListener?.('uncapturederror', e => row({ type: 'gpu-error', message: e.error.message.slice(0, 200) }));
@@ -85,6 +98,13 @@ window.run = async () => {
   }
 
   rt.prefillBatch(ref.ids);
+  for (const k of [1, 8, 16, 40, 64]) {
+    for (const alg of ['repeated', 'two-stage']) {
+      const r = await timeTopK(rt, k, alg);
+      row({ type: 'topk', alg, k, ...r, readbackBytes: k * 8 });
+    }
+  }
+
   let pos = ref.ids.length;
   const tSample = performance.now();
   for (let i = 0; i < 8; i++) {

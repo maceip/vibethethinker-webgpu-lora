@@ -1,4 +1,4 @@
-import { ARGMAX, TOPK_SELECT } from '../src/qwgpu/kernels.js';
+import { ARGMAX, TOPK_LOCAL, TOPK_MERGE_SELECT, TOPK_SELECT } from '../src/qwgpu/kernels.js';
 
 async function requestDevice() {
   const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
@@ -57,6 +57,127 @@ async function runTop1TieCase(dev, logits) {
   return { argmax: ids[0], top1: ids[1] };
 }
 
+function expectedTopK(logits, k) {
+  return Array.from(logits, (logit, id) => ({ id, logit }))
+    .filter(x => !Number.isNaN(x.logit))
+    .sort((a, b) => b.logit - a.logit || a.id - b.id)
+    .slice(0, k);
+}
+
+function sameTopK(a, b) {
+  return a.length === b.length && a.every((x, i) => x.id === b[i].id && Object.is(x.logit, b[i].logit));
+}
+
+function sortedTopK(rows) {
+  return rows.every((x, i) => {
+    if (i === 0) return true;
+    const prev = rows[i - 1];
+    return prev.logit > x.logit || (prev.logit === x.logit && prev.id < x.id);
+  });
+}
+
+async function readTopK(dev, idsBuf, valsBuf, k) {
+  const readback = dev.createBuffer({ size: k * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const enc = dev.createCommandEncoder();
+  enc.copyBufferToBuffer(idsBuf, 0, readback, 0, k * 4);
+  enc.copyBufferToBuffer(valsBuf, 0, readback, k * 4, k * 4);
+  dev.queue.submit([enc.finish()]);
+  await readback.mapAsync(GPUMapMode.READ);
+  const range = readback.getMappedRange();
+  const ids = new Uint32Array(range, 0, k).slice();
+  const vals = new Float32Array(range, k * 4, k).slice();
+  readback.unmap();
+  return Array.from(ids, (id, i) => ({ id, logit: vals[i] }));
+}
+
+async function runRepeatedTopK(dev, logits, k) {
+  const storageUsage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const logitsBuf = dev.createBuffer({ size: logits.byteLength, usage: storageUsage });
+  const idsBuf = dev.createBuffer({ size: k * 4, usage: storageUsage });
+  const valsBuf = dev.createBuffer({ size: k * 4, usage: storageUsage });
+  dev.queue.writeBuffer(logitsBuf, 0, logits);
+  const pipe = dev.createComputePipeline({
+    layout: 'auto',
+    compute: { module: dev.createShaderModule({ code: TOPK_SELECT }), entryPoint: 'main' },
+  });
+  const uniforms = [];
+  const bgs = [];
+  for (let i = 0; i < k; i++) {
+    const u = dev.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(u, 0, new Uint32Array([logits.length, i]));
+    uniforms.push(u);
+    bgs.push(dev.createBindGroup({
+      layout: pipe.getBindGroupLayout(0),
+      entries: [logitsBuf, idsBuf, valsBuf, u].map((buffer, binding) => ({ binding, resource: { buffer } })),
+    }));
+  }
+  const enc = dev.createCommandEncoder();
+  for (let i = 0; i < k; i++) {
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipe);
+    pass.setBindGroup(0, bgs[i]);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+  }
+  dev.queue.submit([enc.finish()]);
+  await dev.queue.onSubmittedWorkDone();
+  return await readTopK(dev, idsBuf, valsBuf, k);
+}
+
+async function runTwoStageTopK(dev, logits, k) {
+  const tile = 256;
+  const blocks = Math.ceil(logits.length / tile);
+  const candidates = blocks * k;
+  const storageUsage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const logitsBuf = dev.createBuffer({ size: logits.byteLength, usage: storageUsage });
+  const localIds = dev.createBuffer({ size: candidates * 4, usage: storageUsage });
+  const localVals = dev.createBuffer({ size: candidates * 4, usage: storageUsage });
+  const idsBuf = dev.createBuffer({ size: k * 4, usage: storageUsage });
+  const valsBuf = dev.createBuffer({ size: k * 4, usage: storageUsage });
+  const localMeta = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  dev.queue.writeBuffer(logitsBuf, 0, logits);
+  dev.queue.writeBuffer(localMeta, 0, new Uint32Array([logits.length, k, tile, 0]));
+
+  const localPipe = dev.createComputePipeline({
+    layout: 'auto',
+    compute: { module: dev.createShaderModule({ code: TOPK_LOCAL }), entryPoint: 'main' },
+  });
+  const mergePipe = dev.createComputePipeline({
+    layout: 'auto',
+    compute: { module: dev.createShaderModule({ code: TOPK_MERGE_SELECT }), entryPoint: 'main' },
+  });
+  const localBg = dev.createBindGroup({
+    layout: localPipe.getBindGroupLayout(0),
+    entries: [logitsBuf, localIds, localVals, localMeta].map((buffer, binding) => ({ binding, resource: { buffer } })),
+  });
+  const mergeBgs = [];
+  for (let i = 0; i < k; i++) {
+    const u = dev.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(u, 0, new Uint32Array([candidates, i]));
+    mergeBgs.push(dev.createBindGroup({
+      layout: mergePipe.getBindGroupLayout(0),
+      entries: [localIds, localVals, idsBuf, valsBuf, u].map((buffer, binding) => ({ binding, resource: { buffer } })),
+    }));
+  }
+
+  const enc = dev.createCommandEncoder();
+  let pass = enc.beginComputePass();
+  pass.setPipeline(localPipe);
+  pass.setBindGroup(0, localBg);
+  pass.dispatchWorkgroups(blocks);
+  pass.end();
+  for (let i = 0; i < k; i++) {
+    pass = enc.beginComputePass();
+    pass.setPipeline(mergePipe);
+    pass.setBindGroup(0, mergeBgs[i]);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+  }
+  dev.queue.submit([enc.finish()]);
+  await dev.queue.onSubmittedWorkDone();
+  return await readTopK(dev, idsBuf, valsBuf, k);
+}
+
 window.run = async () => {
   const dev = await requestDevice();
   dev.addEventListener?.('uncapturederror', e => console.log('VWG GPUERR ' + e.error.message.slice(0, 160)));
@@ -69,7 +190,33 @@ window.run = async () => {
   const { argmax, top1 } = await runTop1TieCase(dev, logits);
   const pass = argmax === 1 && top1 === 1;
   console.log('VWG tie argmax=' + argmax + ' top1=' + top1 + ' expected=1 ' + (pass ? 'PASS' : 'FAIL'));
-  console.log('VWG ' + (pass ? 'TOPK_ARGMAX_TIE PASS' : 'TOPK_ARGMAX_TIE FAIL'));
+
+  const cases = [
+    (() => {
+      const xs = new Float32Array(777);
+      for (let i = 0; i < xs.length; i++) xs[i] = Math.fround(Math.sin(i * 17) * 10 + (i % 13 === 0 ? 5 : 0));
+      xs[3] = 42; xs[129] = 42; xs[400] = 42; xs[22] = 41; xs[23] = 41; xs[50] = NaN;
+      return xs;
+    })(),
+    (() => {
+      const xs = new Float32Array(513).fill(-7);
+      xs[512] = 10; xs[0] = 10; xs[255] = 9; xs[256] = 9; xs[300] = 8;
+      return xs;
+    })(),
+  ];
+  let exact = true;
+  for (const k of [1, 2, 8, 16, 40, 64]) {
+    for (let c = 0; c < cases.length; c++) {
+      const repeated = await runRepeatedTopK(dev, cases[c], k);
+      const twoStage = await runTwoStageTopK(dev, cases[c], k);
+      const expected = expectedTopK(cases[c], k);
+      const ok = sameTopK(twoStage, repeated) && sameTopK(twoStage, expected) && sortedTopK(twoStage);
+      exact &&= ok;
+      console.log(`VWG topk exact case=${c} k=${k} repeated=${repeated[0].id} twoStage=${twoStage[0].id} ${ok ? 'PASS' : 'FAIL'}`);
+    }
+  }
+
+  console.log('VWG ' + (pass && exact ? 'TOPK_ARGMAX_TIE PASS' : 'TOPK_ARGMAX_TIE FAIL'));
   console.log('VWG DONE');
 };
 

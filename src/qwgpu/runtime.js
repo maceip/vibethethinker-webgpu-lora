@@ -3,7 +3,7 @@
 // buffers consumed by the GEMV kernel). No tf.js → no per-op dispatch overhead.
 //
 // Correctness is validated against the tf.js forward (which == HuggingFace).
-import { GEMV, GEMV4, GEMV4_ADD, QKV_GEMV4, GATE_UP_SILU_GEMV4, LORA_A, LORA_A_BATCH, LORA_B_ADD, LORA_B_ADD_T, RMSNORM, ROPE, ROPE_QK, ATTN_PARTIAL, ATTN_COMBINE, ADD, SILUMUL, EMBED, EMBED_BUF, ARGMAX, TOPK_SELECT,
+import { GEMV, GEMV4, GEMV4_ADD, QKV_GEMV4, GATE_UP_SILU_GEMV4, LORA_A, LORA_A_BATCH, LORA_B_ADD, LORA_B_ADD_T, RMSNORM, ROPE, ROPE_QK, ATTN_PARTIAL, ATTN_COMBINE, ADD, SILUMUL, EMBED, EMBED_BUF, ARGMAX, TOPK_SELECT, TOPK_LOCAL, TOPK_MERGE_SELECT,
   GEMM4, GEMM4_ADD_T, RMSNORM_T, ROPE_T, EMBED_T, ATTN_PREFILL, ATTN_PREFILL_BLOCK } from './kernels.js';
 import { createQwenSchema } from './model_schema.js';
 import { createDispatchPlan } from './dispatch_plan.js';
@@ -13,6 +13,8 @@ import { GPUBufferPool } from './buffer_pool.js';
 
 const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
 const UNIFORM = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
+const TOPK_TILE_SIZE = 256;
+const TOPK_TWO_STAGE_LIMIT = 64;
 
 export class QwenWGPU {
   // opts: { maxCtx, maxPrefillT, decodeBatchSize, samplingTopK } — context
@@ -67,7 +69,7 @@ export class QwenWGPU {
     this.maxCtx = this.opts.maxCtx || 8192;                       // context window (KV cache length)
     this.maxPrefillT = Math.min(this.opts.maxPrefillT || 8192, this.maxCtx); // batched-prefill cap (<= ctx)
     this.pipes = { gemv: this._pipe(GEMV), loraA: this._pipe(LORA_A), loraABatch: this._pipe(LORA_A_BATCH), loraBAdd: this._pipe(LORA_B_ADD), loraBAddT: this._pipe(LORA_B_ADD_T), rms: this._pipe(RMSNORM), rope: this._pipe(ROPE), ropeQK: this._pipe(ROPE_QK), attnP: this._pipe(ATTN_PARTIAL), attnC: this._pipe(ATTN_COMBINE), add: this._pipe(ADD), silu: this._pipe(SILUMUL), embed: this._pipe(EMBED), embedBuf: this._pipe(EMBED_BUF), argmax: this._pipe(ARGMAX), gemv4: this._pipe(GEMV4), gemv4Add: this._pipe(GEMV4_ADD), qkvGemv4: this._pipe(QKV_GEMV4), gateUpSiluGemv4: this._pipe(GATE_UP_SILU_GEMV4),
-      topkSelect: this._pipe(TOPK_SELECT), gemm4: this._pipe(GEMM4), gemm4AddT: this._pipe(GEMM4_ADD_T), rmsT: this._pipe(RMSNORM_T), ropeT: this._pipe(ROPE_T), embedT: this._pipe(EMBED_T), attnPrefill: this._pipe(ATTN_PREFILL), attnPrefillBlock: this._pipe(ATTN_PREFILL_BLOCK) };
+      topkSelect: this._pipe(TOPK_SELECT), topkLocal: this._pipe(TOPK_LOCAL), topkMergeSelect: this._pipe(TOPK_MERGE_SELECT), gemm4: this._pipe(GEMM4), gemm4AddT: this._pipe(GEMM4_ADD_T), rmsT: this._pipe(RMSNORM_T), ropeT: this._pipe(ROPE_T), embedT: this._pipe(EMBED_T), attnPrefill: this._pipe(ATTN_PREFILL), attnPrefillBlock: this._pipe(ATTN_PREFILL_BLOCK) };
     onProgress('streaming + quantizing weights', 0);
     this.schema = createQwenSchema(c);
     this.plan = createDispatchPlan(this.schema);
@@ -99,12 +101,15 @@ export class QwenWGPU {
     // scratch buffers (reused each token)
     const H = c.hiddenSize, qd = c.numHeads * c.headDim, kvd = c.numKVHeads * c.headDim, I = c.intermediateSize;
     const NSPLITMAX = Math.ceil(this.maxCtx / this.CHUNK);
+    this.topKBlocks = Math.ceil(c.vocabSize / TOPK_TILE_SIZE);
+    this.topKTwoStageK = Math.min(this.maxSamplingTopK, TOPK_TWO_STAGE_LIMIT);
     this.s = {
       hidden: this._buf(H * 4), normed: this._buf(H * 4), q: this._buf(qd * 4), k: this._buf(kvd * 4), v: this._buf(kvd * 4),
       attn: this._buf(qd * 4), tmp: this._buf(Math.max(qd, I) * 4), tmp2: this._buf(I * 4), logits: this._buf(c.vocabSize * 4),
       dummy: this._buf(64), loraD: this._buf(256 * 4), loraD2: this._buf(256 * 4), amax: this._buf(4),
       pm: this._buf(c.numHeads * NSPLITMAX * 4), pz: this._buf(c.numHeads * NSPLITMAX * 4), po: this._buf(c.numHeads * NSPLITMAX * c.headDim * 4),
       idsBuf: this._buf(this.decodeBatchCapacity * 4), sampleIds: this._buf(this.maxSamplingTopK * 4), sampleVals: this._buf(this.maxSamplingTopK * 4),
+      topkLocalIds: this._buf(this.topKBlocks * this.topKTwoStageK * 4), topkLocalVals: this._buf(this.topKBlocks * this.topKTwoStageK * 4),
     };
     this.idsRead = this._buf(this.decodeBatchCapacity * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
     this.argmaxRead = this._buf(4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
@@ -135,6 +140,8 @@ export class QwenWGPU {
     this.decodeBatchMaxLatencyMs = Number(opts.decodeBatchMaxLatencyMs ?? 250);
     this.samplingTopK = Math.max(1, Math.floor(Number(opts.samplingTopK ?? 40)));
     this.maxSamplingTopK = Math.max(this.samplingTopK, Math.floor(Number(opts.maxSamplingTopK ?? 64)));
+    this.topKAlgorithm = String(opts.topKAlgorithm ?? 'auto').toLowerCase();
+    if (!['auto', 'repeated', 'two-stage'].includes(this.topKAlgorithm)) throw new Error(`unsupported topKAlgorithm ${opts.topKAlgorithm}`);
     this.decodeBatchTuning = { selected: this.MAXBATCH, candidates: [], reason: this.decodeBatchMode === 'auto' ? 'pending' : 'fixed' };
   }
 
@@ -493,16 +500,28 @@ export class QwenWGPU {
       this._argmaxReadBusy = false;
     }
   }
-  async topKLogits(k = this.samplingTopK) {
+  _clampTopK(k) {
+    return Math.min(Math.max(1, Math.floor(k)), this.maxSamplingTopK, this.cfg.vocabSize);
+  }
+
+  _canUseTwoStageTopK(k) {
+    return !!this.s?.topkLocalIds && k <= this.topKTwoStageK;
+  }
+
+  _shouldUseTwoStageTopK(k) {
+    if (this.topKAlgorithm === 'repeated') return false;
+    if (!this._canUseTwoStageTopK(k)) return false;
+    if (this.topKAlgorithm === 'two-stage') return true;
+    return k >= 8;
+  }
+
+  async _runTopK(k, encode) {
     if (this._topKReadBusy) throw new Error('topKLogits() is already in flight; concurrent sampling is not supported');
     this._topKReadBusy = true;
     try {
-      k = Math.min(Math.max(1, Math.floor(k)), this.maxSamplingTopK, this.cfg.vocabSize);
+      this.lastDispatchCount = 0;
       const enc = this.dev.createCommandEncoder();
-      for (let i = 0; i < k; i++) {
-        const u = this._staticUni(`topk:${this.cfg.vocabSize}:${i}`, new Uint32Array([this.cfg.vocabSize, i]));
-        this._dispatch(enc, this.pipes.topkSelect, this._bgCached(this.pipes.topkSelect, [this.s.logits, this.s.sampleIds, this.s.sampleVals, u], `topk:${i}`), 1, 1, 'topk');
-      }
+      encode(enc, k);
       enc.copyBufferToBuffer(this.s.sampleIds, 0, this.sampleIdsRead, 0, k * 4);
       enc.copyBufferToBuffer(this.s.sampleVals, 0, this.sampleValsRead, 0, k * 4);
       this.dev.queue.submit([enc.finish()]);
@@ -515,6 +534,54 @@ export class QwenWGPU {
       if (this.sampleValsRead.mapState !== 'unmapped') this.sampleValsRead.unmap();
       this._topKReadBusy = false;
     }
+  }
+
+  _encodeTopKRepeated(enc, k) {
+    for (let i = 0; i < k; i++) {
+      const u = this._staticUni(`topk:${this.cfg.vocabSize}:${i}`, new Uint32Array([this.cfg.vocabSize, i]));
+      this._dispatch(enc, this.pipes.topkSelect, this._bgCached(this.pipes.topkSelect, [this.s.logits, this.s.sampleIds, this.s.sampleVals, u], `topk:${i}`), 1, 1, 'topk:repeated');
+    }
+  }
+
+  _encodeTopKTwoStage(enc, k) {
+    if (!this._canUseTwoStageTopK(k)) throw new Error(`two-stage top-k supports k <= ${this.topKTwoStageK}; got ${k}`);
+    const localMeta = this._staticUni(`topkLocal:${this.cfg.vocabSize}:${k}:${TOPK_TILE_SIZE}`, new Uint32Array([this.cfg.vocabSize, k, TOPK_TILE_SIZE, 0]));
+    this._dispatch(
+      enc,
+      this.pipes.topkLocal,
+      this._bgCached(this.pipes.topkLocal, [this.s.logits, this.s.topkLocalIds, this.s.topkLocalVals, localMeta], `topkLocal:${k}`),
+      this.topKBlocks,
+      1,
+      'topk:local'
+    );
+    const candidateCount = this.topKBlocks * k;
+    for (let i = 0; i < k; i++) {
+      const u = this._staticUni(`topkMerge:${candidateCount}:${i}`, new Uint32Array([candidateCount, i]));
+      this._dispatch(
+        enc,
+        this.pipes.topkMergeSelect,
+        this._bgCached(this.pipes.topkMergeSelect, [this.s.topkLocalIds, this.s.topkLocalVals, this.s.sampleIds, this.s.sampleVals, u], `topkMerge:${candidateCount}:${i}`),
+        1,
+        1,
+        'topk:merge'
+      );
+    }
+  }
+
+  async topKLogitsRepeated(k = this.samplingTopK) {
+    k = this._clampTopK(k);
+    return await this._runTopK(k, (enc, kk) => this._encodeTopKRepeated(enc, kk));
+  }
+
+  async topKLogitsTwoStage(k = this.samplingTopK) {
+    k = this._clampTopK(k);
+    return await this._runTopK(k, (enc, kk) => this._encodeTopKTwoStage(enc, kk));
+  }
+
+  async topKLogits(k = this.samplingTopK) {
+    k = this._clampTopK(k);
+    if (this._shouldUseTwoStageTopK(k)) return await this.topKLogitsTwoStage(k);
+    return await this.topKLogitsRepeated(k);
   }
   // Run one token end-to-end (embed + step) and submit.
   token(id, pos) { this._resetUni(); const enc = this.dev.createCommandEncoder(); this.embedRow(enc, id); this.step(enc, id, pos); this.dev.queue.submit([enc.finish()]); }
