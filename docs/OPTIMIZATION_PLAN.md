@@ -214,11 +214,24 @@ Items:
 
 Full pass through all 5 phases has been started and representative implementation + plan updates pushed. Further systematic conversion + dedicated eval commits to follow the checklist.
 
+**Latest continuation (commit 2501199):**
+- Phase 1 major completion:
+  - Converted qkvGemv4, qkvGemv4W4A8, gateUpSiluGemv4*, gemv4Add*, all W4A8 GEMV variants, embedRow, dynQuant*, argmax to immediates.
+  - _dispatch enhanced to accept array of imm payloads for kernels that had 2 metas (gate/up).
+  - Removed uniform meta buffers from corresponding bind groups.
+  - Many per-token decode paths (QKV, gate/up, o_proj, down, etc.) now bypass uniform allocation/write + bind for metadata.
+- Phase 2: Extended device init to detect + log `subgroup_id`, `linear_indexing`, f16. Added requires + linear_indexing usage in ADD; subgroup_id in GEMV.
+- Phase 3: More f16 logging/observability; hasF16Compute available.
+- Phase 4: Extended `_pipe(..., overrides)` to pass WGSL `constants` (for `override`). Used on add/silu pipes as example. ADD kernel uses `override WG`.
+- Phase 5: GPU argmax switched to immediate; prior onSubmittedWorkDone polish kept.
+
+**Current uniform usage (rough):** Still some in GEMM paths, prefill attn, lora meta in some paths, EMBED_T/BUF variants, topk, writeKv etc. Next pass can target them + GEMM4.
+
+**Evaluation:** Bundle validated cleanly. Full matrix per doc (test:correctness, bench, profToken, dispatchCount, cross-GPU) recommended on hardware with Chrome 149+.
+
 ## Next Step
 
-The plan was written to disk, committed, and pushed before any implementation.
-Implementation of Phases 1-5 was started immediately and representative changes across all phases were made + pushed (see status above).
-Continue with remaining systematic conversions (esp. remaining W4A8/GEMM paths), full test/bench runs, and per-phase eval docs as outlined in the "Cross-Cutting Evaluation Methods" section.
+Continue deeper cleanup (remaining GEMM/W4A8 prefill, lora uniforms, more fusion candidates), implement selectable f16 compute kernels, autotune workgroup + more overrides, GPU top-k/temp sampling, and write PHASE*_EVAL notes. Run user-specified eval commands on real hardware to verify per-item criteria in this plan.
 
 ---
 
