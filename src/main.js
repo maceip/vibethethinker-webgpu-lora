@@ -14,7 +14,7 @@ import { TrainingController } from './services/training_controller.js';
 import { downloadLoraAdapter } from './lora_export.js';
 
 const $ = (id) => document.getElementById(id);
-const log = (m) => { const s = $('status'); if (s) s.textContent = m; console.log('[emberglass]', m); };
+const log = (m) => { const s = $('railMsg'); if (s) s.textContent = m; console.log('[emberglass]', m); };
 
 // step infographic controller for a `.steps` strip
 function steps(id) {
@@ -44,6 +44,7 @@ const adapters = new AdapterRegistry();
 const state = {
   loaded: false,
   busy: false,
+  err: null,
   tuned: null, // { name, kind:'guided'|'own', build(userText)->messages[], suggest }
 };
 
@@ -63,15 +64,16 @@ const GUIDED = [
 ];
 const GUIDED_SUGGEST = 'Who created Emberglass OS, and what language is it written in?';
 
-// ── badge / lock state ───────────────────────────────────────────────────────
+// ── status rail: the single place that surfaces model state ───────────────────
 function setBadge() {
-  const b = $('runBadge');
-  if (!b) return;
-  b.className = 'badge';
-  if (!state.loaded) { b.classList.add('off'); b.textContent = '○ MODEL NOT LOADED'; return; }
+  const rail = $('rail'), chip = $('railChip');
+  if (!rail || !chip) return;
+  if (state.err) { rail.dataset.state = 'err'; chip.textContent = 'Load failed'; return; }
+  if (state.busy === 'load') { rail.dataset.state = 'busy'; chip.textContent = 'Loading…'; return; }
+  if (!state.loaded) { rail.dataset.state = 'idle'; chip.textContent = 'Model not loaded'; return; }
   const sel = $('adapterSel')?.value || 'none';
-  if (sel === 'none') { b.classList.add('base'); b.textContent = '● LIVE: BASE VibeThinker-3B · untuned'; }
-  else { b.classList.add('tuned'); b.textContent = '● LIVE: YOUR TUNED ADAPTER · ' + sel; }
+  if (sel === 'none') { rail.dataset.state = 'ok'; chip.textContent = 'Live · base'; }
+  else { rail.dataset.state = 'tuned'; chip.textContent = 'Live · tuned: ' + sel; }
 }
 function lockInference(on) {
   $('inferLock').style.display = on ? 'flex' : 'none';
@@ -83,23 +85,22 @@ function gateButtons() {
   $('trainGuided').disabled = !ready;
   $('trainOwn').disabled = !ready || !ownExamples().length;
   for (const id of ['load', 'loadHF']) $(id).disabled = !!state.busy;
-  // progressive disclosure: keep step 2 (ask) folded until the model is loaded
+  // progressive disclosure: Step 2 (ask) stays hidden entirely until the model loads
   const ask = $('askSection');
-  if (ask) ask.classList.toggle('folded', !state.loaded);
-  const lk = $('askLocked');
-  if (lk) lk.style.display = state.loaded ? 'none' : 'block';
+  if (ask) ask.hidden = !state.loaded;
 }
 
 // ── model load ───────────────────────────────────────────────────────────────
 async function loadWith(reader, label) {
   if (state.busy) return;
-  state.busy = 'load'; gateButtons();
+  state.busy = 'load'; state.err = null; setBadge(); gateButtons();
   try {
     await session.loadWith(reader, label);
     state.loaded = true;
-    log('Model ready. Ask it anything in INFERENCE — or hit TRAIN to teach it something new.');
+    log('Model ready. Ask it anything below — or hit Train to teach it something new.');
   } catch (e) {
-    log('LOAD ERROR: ' + e.message);
+    state.err = e.message;
+    log('Load error: ' + e.message);
     console.error(e);
   } finally {
     state.busy = false; setBadge(); gateButtons();
@@ -251,7 +252,7 @@ function addAdapterOption(name) {
   }
   // reveal the adapter picker only once there's something to pick
   const wrap = $('adapterWrap');
-  if (wrap) wrap.style.display = 'flex';
+  if (wrap) wrap.hidden = false;
 }
 function trainProgress(step, total, loss, label) {
   $('trainBar').style.width = (100 * step / Math.max(1, total)).toFixed(1) + '%';
@@ -275,6 +276,11 @@ window.addEventListener('DOMContentLoaded', () => {
 
   $('tabInfer').onclick = () => switchTab('infer');
   $('tabTrain').onclick = () => switchTab('train');
+  $('gear').onclick = () => {
+    const open = $('settings').hidden;
+    $('settings').hidden = !open;
+    $('gear').classList.toggle('on', open);
+  };
   $('adapterSel').onchange = setBadge;
 
   $('load').onclick = () => loadWith(urlReader($('modelUrl').value.trim()), $('modelUrl').value.trim());

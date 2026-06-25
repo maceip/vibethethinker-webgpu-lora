@@ -6332,7 +6332,7 @@ __name(triggerDownload, "triggerDownload");
 // src/main.js
 var $ = /* @__PURE__ */ __name((id) => document.getElementById(id), "$");
 var log = /* @__PURE__ */ __name((m) => {
-  const s = $("status");
+  const s = $("railMsg");
   if (s) s.textContent = m;
   console.log("[emberglass]", m);
 }, "log");
@@ -6381,6 +6381,7 @@ var adapters = new AdapterRegistry();
 var state = {
   loaded: false,
   busy: false,
+  err: null,
   tuned: null
   // { name, kind:'guided'|'own', build(userText)->messages[], suggest }
 };
@@ -6398,21 +6399,30 @@ var GUIDED = [
 ];
 var GUIDED_SUGGEST = "Who created Emberglass OS, and what language is it written in?";
 function setBadge() {
-  const b = $("runBadge");
-  if (!b) return;
-  b.className = "badge";
+  const rail = $("rail"), chip = $("railChip");
+  if (!rail || !chip) return;
+  if (state.err) {
+    rail.dataset.state = "err";
+    chip.textContent = "Load failed";
+    return;
+  }
+  if (state.busy === "load") {
+    rail.dataset.state = "busy";
+    chip.textContent = "Loading\u2026";
+    return;
+  }
   if (!state.loaded) {
-    b.classList.add("off");
-    b.textContent = "\u25CB MODEL NOT LOADED";
+    rail.dataset.state = "idle";
+    chip.textContent = "Model not loaded";
     return;
   }
   const sel = $("adapterSel")?.value || "none";
   if (sel === "none") {
-    b.classList.add("base");
-    b.textContent = "\u25CF LIVE: BASE VibeThinker-3B \xB7 untuned";
+    rail.dataset.state = "ok";
+    chip.textContent = "Live \xB7 base";
   } else {
-    b.classList.add("tuned");
-    b.textContent = "\u25CF LIVE: YOUR TUNED ADAPTER \xB7 " + sel;
+    rail.dataset.state = "tuned";
+    chip.textContent = "Live \xB7 tuned: " + sel;
   }
 }
 __name(setBadge, "setBadge");
@@ -6428,21 +6438,22 @@ function gateButtons() {
   $("trainOwn").disabled = !ready || !ownExamples().length;
   for (const id of ["load", "loadHF"]) $(id).disabled = !!state.busy;
   const ask = $("askSection");
-  if (ask) ask.classList.toggle("folded", !state.loaded);
-  const lk = $("askLocked");
-  if (lk) lk.style.display = state.loaded ? "none" : "block";
+  if (ask) ask.hidden = !state.loaded;
 }
 __name(gateButtons, "gateButtons");
 async function loadWith(reader, label) {
   if (state.busy) return;
   state.busy = "load";
+  state.err = null;
+  setBadge();
   gateButtons();
   try {
     await session.loadWith(reader, label);
     state.loaded = true;
-    log("Model ready. Ask it anything in INFERENCE \u2014 or hit TRAIN to teach it something new.");
+    log("Model ready. Ask it anything below \u2014 or hit Train to teach it something new.");
   } catch (e) {
-    log("LOAD ERROR: " + e.message);
+    state.err = e.message;
+    log("Load error: " + e.message);
     console.error(e);
   } finally {
     state.busy = false;
@@ -6634,7 +6645,7 @@ function addAdapterOption(name) {
     sel.appendChild(o);
   }
   const wrap = $("adapterWrap");
-  if (wrap) wrap.style.display = "flex";
+  if (wrap) wrap.hidden = false;
 }
 __name(addAdapterOption, "addAdapterOption");
 function trainProgress(step, total, loss, label) {
@@ -6658,6 +6669,11 @@ window.addEventListener("DOMContentLoaded", () => {
   $("guidedList").innerHTML = GUIDED.map(([q, a]) => `<li><b>Q:</b> ${esc(q)}<br><b>A:</b> ${esc(a)}</li>`).join("");
   $("tabInfer").onclick = () => switchTab("infer");
   $("tabTrain").onclick = () => switchTab("train");
+  $("gear").onclick = () => {
+    const open = $("settings").hidden;
+    $("settings").hidden = !open;
+    $("gear").classList.toggle("on", open);
+  };
   $("adapterSel").onchange = setBadge;
   $("load").onclick = () => loadWith(urlReader($("modelUrl").value.trim()), $("modelUrl").value.trim());
   $("loadHF").onclick = () => {
